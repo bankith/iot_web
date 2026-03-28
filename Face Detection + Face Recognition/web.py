@@ -809,20 +809,6 @@ h1 {
     color: var(--text-sub);
 }
 
-.enroll-btn {
-    background: linear-gradient(135deg, var(--primary), #818cf8);
-    border: none;
-    color: white;
-    padding: 6px 14px;
-    cursor: pointer;
-    font-size: .85rem;
-    transition: .25s;
-}
-
-.enroll-btn:hover {
-    transform: scale(1.05);
-}
-
 /* Stats */
 .stats {
     display: grid;
@@ -852,94 +838,6 @@ h1 {
     color: var(--text-sub);
 }
 
-.modal {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,.65);
-    backdrop-filter: blur(10px);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 999;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity .3s ease;
-}
-
-.modal.show {
-    opacity: 1;
-    pointer-events: auto;
-}
-
-.modal-content {
-    position: relative;
-    background: linear-gradient(
-        180deg,
-        rgba(15,23,42,.95),
-        rgba(15,23,42,.85)
-    );
-    padding: 32px;
-    width: 90%;
-    max-width: 480px;
-    border: 1px solid var(--border);
-    box-shadow: 0 40px 80px rgba(0,0,0,.5);
-    transform: scale(.92) translateY(20px);
-    opacity: 0;
-    transition: all .35s cubic-bezier(.22,.61,.36,1);
-}
-
-.modal.show .modal-content {
-    transform: scale(1) translateY(0);
-    opacity: 1;
-}
-
-.close {
-    position: absolute;
-    top: 18px;
-    right: 22px;
-    font-size: 26px;
-    color: var(--text-sub);
-    cursor: pointer;
-}
-
-.form-group {
-    margin-bottom: 16px;
-}
-
-.form-group label {
-    display: block;
-    margin-bottom: 6px;
-}
-
-.form-group input {
-    width: 100%;
-    padding: 10px;
-    background: rgba(255,255,255,.08);
-    border: 1px solid var(--border);
-    color: white;
-}
-
-.modal-buttons {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-}
-
-.btn {
-    padding: 10px 20px;
-    border: none;
-    cursor: pointer;
-}
-
-.btn-primary {
-    background: linear-gradient(135deg, var(--primary), #818cf8);
-    color: white;
-}
-
-.btn-secondary {
-    background: rgba(255,255,255,.1);
-    color: white;
-}
 </style>
 </head>
 
@@ -970,28 +868,7 @@ h1 {
     </div>
 </div>
 
-<div id="enrollModal" class="modal">
-    <div class="modal-content">
-        <span class="close">&times;</span>
-        <h2>Enroll New Person</h2>
-
-        <form id="enrollForm">
-            <div class="form-group">
-                <label>Name</label>
-                <input id="personName" required>
-            </div>
-            <input type="hidden" id="faceIndex">
-            <div class="modal-buttons">
-                <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-                <button type="submit" class="btn btn-primary">Enroll</button>
-            </div>
-        </form>
-    </div>
-</div>
-
 <script>
-let currentFaceIndex = null;
-
 function updateFaces() {
     fetch('/get_faces')
         .then(r => r.json())
@@ -1009,7 +886,7 @@ function updateFaces() {
                             </div>
                             ${face.identified ?
                                 `<div class="face-similarity">${(face.matches[0].similarity*100).toFixed(1)}%</div>` :
-                                `<button class="enroll-btn" onclick="openEnrollModal(${i})">Enroll</button>`
+                                `<div class="face-similarity" style="color:var(--danger)">Not in DB</div>`
                             }
                         </div>
                         <div style="font-size:.85rem;opacity:.7">
@@ -1019,34 +896,6 @@ function updateFaces() {
                 `).join('');
         });
 }
-
-function openEnrollModal(index) {
-    faceIndex.value = index;
-    enrollModal.classList.add('show');
-    setTimeout(()=>personName.focus(),150);
-}
-
-function closeModal() {
-    enrollModal.classList.remove('show');
-    enrollForm.reset();
-}
-
-document.querySelector('.close').onclick = closeModal;
-window.onclick = e => e.target===enrollModal && closeModal();
-document.addEventListener('keydown', e => e.key==='Escape' && closeModal());
-
-enrollForm.onsubmit = e => {
-    e.preventDefault();
-    fetch('/enroll',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({
-            face_index:+faceIndex.value,
-            name:personName.value,
-            person_id:personId.value || 'person_'+Math.random().toString(36).slice(2,9)
-        })
-    }).then(r=>r.json()).then(()=>closeModal());
-};
 
 setInterval(updateFaces,1000);
 updateFaces();
@@ -1228,30 +1077,110 @@ def get_faces():
     })
 
 
-@app.route('/enroll', methods=['POST'])
-def enroll():
-    """Enroll a face from current detection."""
-    global face_results, lock, database
+IMG_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
 
-    data = request.json
-    face_index = data['face_index']
-    person_id = data['person_id']
-    name = data['name']
 
-    with lock:
-        if face_index >= len(face_results):
-            return jsonify({'success': False, 'error': 'Invalid face index'})
+def build_database_from_folder(datasets_dir: str, scrfd: SCRFD, arcface: ArcFace,
+                                database: FaceDatabase) -> None:
+    """
+    Pre-build face database from a datasets folder.
 
-        face = face_results[face_index]
-        embedding = face['embedding']
+    Folder structure:
+        datasets/
+        ├── rooney/
+        │   ├── rooney1.jpg
+        │   └── rooney2.jpg
+        └── titi/
+            ├── 001.jpg
+            └── 002.jpg
 
-    database.add_person(person_id, name, embedding, None)
+    Each sub-folder name becomes the person's name in the database.
+    All images per person are averaged into a single representative embedding.
 
-    return jsonify({
-        'success': True,
-        'person_id': person_id,
-        'name': name
-    })
+    Args:
+        datasets_dir: Path to folder containing per-person sub-folders
+        scrfd:        Initialized SCRFD face detector
+        arcface:      Initialized ArcFace recognizer
+        database:     FaceDatabase instance to populate
+    """
+    datasets_path = Path(datasets_dir)
+    if not datasets_path.exists():
+        print(f"  ⚠ Datasets folder not found: {datasets_dir} — skipping pre-enrollment")
+        return
+
+    person_dirs = sorted([d for d in datasets_path.iterdir() if d.is_dir()])
+    if not person_dirs:
+        print(f"  ⚠ No sub-folders found in {datasets_dir} — skipping pre-enrollment")
+        return
+
+    print(f"\nBuilding database from: {datasets_dir}")
+    print("-" * 40)
+
+    enrolled_count = 0
+
+    for person_dir in person_dirs:
+        name = person_dir.name
+        person_id = name.lower().replace(' ', '_')
+
+        # Skip if person already enrolled
+        if database.get_person(person_id) is not None:
+            print(f"  [{name}] already in database — skipped")
+            continue
+
+        files = [f for f in sorted(person_dir.iterdir())
+                 if f.suffix.lower() in IMG_EXTENSIONS]
+        if not files:
+            print(f"  [{name}] no images found — skipped")
+            continue
+
+        embeddings = []
+        for img_path in files:
+            img_bgr = cv2.imread(str(img_path))
+            if img_bgr is None:
+                print(f"  [{name}] cannot read {img_path.name} — skipped")
+                continue
+
+            # Detect face with SCRFD
+            scrfd.preprocess(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+            if not scrfd.Execute():
+                print(f"  [{name}] SCRFD failed on {img_path.name} — skipped")
+                continue
+
+            detections = scrfd.postprocess()
+            if not detections:
+                print(f"  [{name}] no face in {img_path.name} — skipped")
+                continue
+
+            # Pick highest-score detection
+            best = max(detections, key=lambda d: d['score'])
+            x1, y1, x2, y2 = [int(v) for v in best['bbox']]
+            h, w = img_bgr.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            face_crop = img_bgr[y1:y2, x1:x2]
+            embedding = arcface.get_embedding(face_crop)
+            if embedding is not None:
+                embeddings.append(embedding)
+                print(f"  [{name}] {img_path.name} ✓")
+
+        if embeddings:
+            # Average all embeddings then re-normalize → one representative vector
+            avg_embedding = np.mean(embeddings, axis=0)
+            norm = np.linalg.norm(avg_embedding)
+            avg_embedding = avg_embedding / (norm + 1e-8)
+            database.add_person(person_id, name, avg_embedding)
+            print(f"  → Enrolled: {name} ({len(embeddings)} photo(s))\n")
+            enrolled_count += 1
+        else:
+            print(f"  [{name}] no valid faces found — not enrolled\n")
+
+    print(f"Pre-enrollment done: {enrolled_count} new person(s) added")
+    print(f"Total in database: {len(database)} person(s)")
+    print("-" * 40)
 
 
 def main():
@@ -1260,6 +1189,7 @@ def main():
     parser = argparse.ArgumentParser(description='Web-Based Face Recognition System')
     parser.add_argument('--camera', type=int, default=0, help='Camera ID')
     parser.add_argument('--db-path', default='face_database', help='Database directory')
+    parser.add_argument('--datasets', default='', help='Path to datasets folder (sub-folders = person names)')
     parser.add_argument('--scrfd-dlc', default='../SCRFD (Face Detection)/Model/scrfd_quantized_6490.dlc')
     parser.add_argument('--arcface-dlc', default='../ArcFace (Face Recognition)/Model/arcface_quantized_6490.dlc')
     parser.add_argument('--runtime', default='DSP', choices=['CPU', 'DSP'])
@@ -1318,6 +1248,12 @@ def main():
         return 1
 
     print("✓ Models initialized")
+
+    # Pre-enroll faces from datasets folder (if provided)
+    if args.datasets:
+        build_database_from_folder(args.datasets, scrfd_model, arcface_model, database)
+    else:
+        print("\n(No --datasets folder specified — skipping pre-enrollment)")
 
     print("\nStarting webcam detection...")
     detection_process = threading.Thread(
