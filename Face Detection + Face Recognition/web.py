@@ -15,6 +15,7 @@ from snpehelper_manager import PerfProfile, Runtime, SnpeContext
 # SCRFD Face Detection Logic
 # =============================================================================
 
+
 class SCRFD(SnpeContext):
     """
     SCRFD (Sample and Computation Redistributed Face Detection) implementation
@@ -27,16 +28,19 @@ class SCRFD(SnpeContext):
     Model Outputs: Multi-scale predictions with bboxes, scores, and landmarks
     """
 
-    def __init__(self, dlc_path: str = "None",
-                 input_layers: list = [],
-                 output_layers: list = [],
-                 output_tensors: list = [],
-                 runtime: str = Runtime.CPU,
-                 profile_level: str = PerfProfile.BALANCED,
-                 enable_cache: bool = False,
-                 input_size: tuple = (320, 320),
-                 conf_threshold: float = 0.5,
-                 nms_threshold: float = 0.4):
+    def __init__(
+        self,
+        dlc_path: str = "None",
+        input_layers: list = [],
+        output_layers: list = [],
+        output_tensors: list = [],
+        runtime: str = Runtime.CPU,
+        profile_level: str = PerfProfile.BALANCED,
+        enable_cache: bool = False,
+        input_size: tuple = (320, 320),
+        conf_threshold: float = 0.5,
+        nms_threshold: float = 0.4,
+    ):
         """
         Initialize SCRFD face detector.
 
@@ -45,8 +49,15 @@ class SCRFD(SnpeContext):
             conf_threshold: Confidence threshold for face detection
             nms_threshold: NMS IoU threshold for removing duplicate detections
         """
-        super().__init__(dlc_path, input_layers, output_layers, output_tensors,
-                        runtime, profile_level, enable_cache)
+        super().__init__(
+            dlc_path,
+            input_layers,
+            output_layers,
+            output_tensors,
+            runtime,
+            profile_level,
+            enable_cache,
+        )
 
         self.input_size = input_size
         self.conf_threshold = conf_threshold
@@ -214,9 +225,9 @@ class SCRFD(SnpeContext):
         # Output tensor mapping based on model inspection
         # Format: {stride: {'score': tensor_id, 'bbox': tensor_id, 'kps': tensor_id}}
         output_mapping = {
-            8: {'score': '446', 'bbox': '449', 'kps': '452'},   # 3200 anchors
-            16: {'score': '466', 'bbox': '469', 'kps': '472'},  # 800 anchors
-            32: {'score': '486', 'bbox': '489', 'kps': '492'}   # 200 anchors
+            8: {"score": "446", "bbox": "449", "kps": "452"},  # 3200 anchors
+            16: {"score": "466", "bbox": "469", "kps": "472"},  # 800 anchors
+            32: {"score": "486", "bbox": "489", "kps": "492"},  # 200 anchors
         }
 
         all_bboxes = []
@@ -229,9 +240,9 @@ class SCRFD(SnpeContext):
             num_pred = self._num_anchors[stride]
 
             # Get outputs from model
-            score_output = self.GetOutputBuffer(mapping['score'])
-            bbox_output = self.GetOutputBuffer(mapping['bbox'])
-            kps_output = self.GetOutputBuffer(mapping['kps'])
+            score_output = self.GetOutputBuffer(mapping["score"])
+            bbox_output = self.GetOutputBuffer(mapping["bbox"])
+            kps_output = self.GetOutputBuffer(mapping["kps"])
 
             # Reshape outputs
             scores = score_output.reshape((num_pred, 1))
@@ -279,21 +290,27 @@ class SCRFD(SnpeContext):
         detections = []
         for bbox, score, kp in zip(bboxes, scores, kps):
             detection = {
-                'bbox': [
+                "bbox": [
                     bbox[0] * scale_x,
                     bbox[1] * scale_y,
                     bbox[2] * scale_x,
-                    bbox[3] * scale_y
+                    bbox[3] * scale_y,
                 ],
-                'score': float(score),
-                'landmarks': kp * np.array([scale_x, scale_y])
+                "score": float(score),
+                "landmarks": kp * np.array([scale_x, scale_y]),
             }
             detections.append(detection)
 
         return detections
 
-    def draw_detections(self, image, detections, output_path="scrfd_result.jpg",
-                       draw_landmarks=True, draw_scores=True):
+    def draw_detections(
+        self,
+        image,
+        detections,
+        output_path="scrfd_result.jpg",
+        draw_landmarks=True,
+        draw_scores=True,
+    ):
         """
         Visualize face detections on image.
 
@@ -313,9 +330,9 @@ class SCRFD(SnpeContext):
 
         # Draw each detection
         for det in detections:
-            bbox = det['bbox']
-            score = det['score']
-            landmarks = det['landmarks']
+            bbox = det["bbox"]
+            score = det["score"]
+            landmarks = det["landmarks"]
 
             # Draw bounding box
             x1, y1, x2, y2 = [int(v) for v in bbox]
@@ -324,8 +341,15 @@ class SCRFD(SnpeContext):
             # Draw score
             if draw_scores:
                 text = f"{score:.2f}"
-                cv2.putText(vis_image, text, (x1, y1 - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(
+                    vis_image,
+                    text,
+                    (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    2,
+                )
 
             # Draw landmarks (5 facial keypoints)
             if draw_landmarks:
@@ -339,9 +363,11 @@ class SCRFD(SnpeContext):
 
         return vis_image
 
+
 # =============================================================================
 # ArcFace Face Recognition Logic
 # =============================================================================
+
 
 class ArcFace(SnpeContext):
     """
@@ -361,17 +387,27 @@ class ArcFace(SnpeContext):
         input_size: Input image size (default: (112, 112))
     """
 
-    def __init__(self, dlc_path: str = "None",
-                 input_layers: list = [],
-                 output_layers: list = [],
-                 output_tensors: list = [],
-                 runtime: str = Runtime.CPU,
-                 profile_level: str = PerfProfile.BALANCED,
-                 enable_cache: bool = False,
-                 input_size: tuple = (112, 112)):
+    def __init__(
+        self,
+        dlc_path: str = "None",
+        input_layers: list = [],
+        output_layers: list = [],
+        output_tensors: list = [],
+        runtime: str = Runtime.CPU,
+        profile_level: str = PerfProfile.BALANCED,
+        enable_cache: bool = False,
+        input_size: tuple = (112, 112),
+    ):
 
-        super().__init__(dlc_path, input_layers, output_layers, output_tensors,
-                        runtime, profile_level, enable_cache)
+        super().__init__(
+            dlc_path,
+            input_layers,
+            output_layers,
+            output_tensors,
+            runtime,
+            profile_level,
+            enable_cache,
+        )
 
         self.input_size = input_size
         self.embedding_dim = 512
@@ -426,10 +462,7 @@ class ArcFace(SnpeContext):
         # L2 normalization (critical for cosine similarity)
         normalized_embedding = self.normalize_embedding(embedding)
 
-        return {
-            'embedding': normalized_embedding,
-            'raw_embedding': embedding.copy()
-        }
+        return {"embedding": normalized_embedding, "raw_embedding": embedding.copy()}
 
     def normalize_embedding(self, embedding):
         """
@@ -463,7 +496,7 @@ class ArcFace(SnpeContext):
             return None
 
         result = self.postprocess()
-        return result['embedding']
+        return result["embedding"]
 
     @staticmethod
     def cosine_similarity(embedding1, embedding2):
@@ -517,16 +550,21 @@ class ArcFace(SnpeContext):
         distance = ArcFace.euclidean_distance(embedding1, embedding2)
 
         return {
-            'match': similarity > threshold,
-            'similarity': float(similarity),
-            'distance': float(distance),
-            'confidence': 'high' if similarity > 0.6 else ('medium' if similarity > 0.4 else 'low')
+            "match": similarity > threshold,
+            "similarity": float(similarity),
+            "distance": float(distance),
+            "confidence": (
+                "high"
+                if similarity > 0.6
+                else ("medium" if similarity > 0.4 else "low")
+            ),
         }
 
 
 # =============================================================================
 # Face Database Logic
 # =============================================================================
+
 
 class FaceDatabase:
     """
@@ -556,22 +594,22 @@ class FaceDatabase:
         """Load database from disk."""
         # Load metadata
         if self.metadata_file.exists():
-            with open(self.metadata_file, 'r') as f:
+            with open(self.metadata_file, "r") as f:
                 self.metadata = json.load(f)
 
         # Load embeddings
         if self.embeddings_file.exists():
-            with open(self.embeddings_file, 'rb') as f:
+            with open(self.embeddings_file, "rb") as f:
                 self.embeddings = pickle.load(f)
 
     def save(self):
         """Save database to disk."""
         # Save metadata
-        with open(self.metadata_file, 'w') as f:
+        with open(self.metadata_file, "w") as f:
             json.dump(self.metadata, f, indent=2)
 
         # Save embeddings
-        with open(self.embeddings_file, 'wb') as f:
+        with open(self.embeddings_file, "wb") as f:
             pickle.dump(self.embeddings, f)
 
     def add_person(self, person_id, name, embedding, image_path=None):
@@ -589,10 +627,10 @@ class FaceDatabase:
         """
         # Store metadata
         self.metadata[person_id] = {
-            'name': name,
-            'enrolled_at': datetime.now().isoformat(),
-            'image_path': str(image_path) if image_path else None,
-            'embedding_shape': embedding.shape
+            "name": name,
+            "enrolled_at": datetime.now().isoformat(),
+            "image_path": str(image_path) if image_path else None,
+            "embedding_shape": embedding.shape,
         }
 
         # Store embedding
@@ -631,15 +669,17 @@ class FaceDatabase:
             similarity = float(np.dot(query_embedding, db_embedding))
 
             if similarity >= threshold:
-                matches.append({
-                    'person_id': person_id,
-                    'name': self.metadata[person_id]['name'],
-                    'similarity': similarity,
-                    'enrolled_at': self.metadata[person_id]['enrolled_at']
-                })
+                matches.append(
+                    {
+                        "person_id": person_id,
+                        "name": self.metadata[person_id]["name"],
+                        "similarity": similarity,
+                        "enrolled_at": self.metadata[person_id]["enrolled_at"],
+                    }
+                )
 
         # Sort by similarity (descending)
-        matches.sort(key=lambda x: x['similarity'], reverse=True)
+        matches.sort(key=lambda x: x["similarity"], reverse=True)
 
         return matches[:top_k]
 
@@ -648,24 +688,19 @@ class FaceDatabase:
         if person_id in self.metadata:
             return {
                 **self.metadata[person_id],
-                'person_id': person_id,
-                'embedding': self.embeddings[person_id]
+                "person_id": person_id,
+                "embedding": self.embeddings[person_id],
             }
         return None
 
     def list_all(self):
         """List all people in the database."""
-        return [
-            {
-                'person_id': pid,
-                **info
-            }
-            for pid, info in self.metadata.items()
-        ]
+        return [{"person_id": pid, **info} for pid, info in self.metadata.items()]
 
     def __len__(self):
         """Get number of people in database."""
         return len(self.metadata)
+
 
 # =============================================================================
 # Web Application Logic
@@ -937,7 +972,7 @@ def detection_thread(camera_id, scrfd, arcface, db, skip_frames=1, threshold=0.4
 
                     faces = []
                     for det in detections:
-                        x1, y1, x2, y2 = [int(v) for v in det['bbox']]
+                        x1, y1, x2, y2 = [int(v) for v in det["bbox"]]
 
                         h, w = frame.shape[:2]
                         x1, y1 = max(0, x1), max(0, y1)
@@ -950,52 +985,65 @@ def detection_thread(camera_id, scrfd, arcface, db, skip_frames=1, threshold=0.4
                             if embedding is not None:
                                 matches = db.search(embedding, threshold=0.9, top_k=3)
 
-                                filtered_matches = [m for m in matches if m['similarity'] >= 0.5]
+                                filtered_matches = [
+                                    m for m in matches if m["similarity"] >= 0.5
+                                ]
 
-                                faces.append({
-                                    'bbox': np.array(det['bbox']).astype(float).tolist(),
-                                    'detection_score': float(det['score']),
-                                    'landmarks': np.array(det['landmarks']).astype(float).tolist(),
-                                    'embedding': embedding,
-                                    'matches': filtered_matches,
-                                    'identified': len(filtered_matches) > 0,
-                                    'face_crop': face_crop
-                                })
+                                faces.append(
+                                    {
+                                        "bbox": np.array(det["bbox"])
+                                        .astype(float)
+                                        .tolist(),
+                                        "detection_score": float(det["score"]),
+                                        "landmarks": np.array(det["landmarks"])
+                                        .astype(float)
+                                        .tolist(),
+                                        "embedding": embedding,
+                                        "matches": filtered_matches,
+                                        "identified": len(filtered_matches) > 0,
+                                        "face_crop": face_crop,
+                                    }
+                                )
 
                     if len(faces) > 1:
                         person_best_match = {}
 
                         for i, face in enumerate(faces):
-                            if face['identified'] and len(face['matches']) > 0:
-                                person_id = face['matches'][0]['person_id']
-                                similarity = face['matches'][0]['similarity']
-                                detection_score = face['detection_score']
+                            if face["identified"] and len(face["matches"]) > 0:
+                                person_id = face["matches"][0]["person_id"]
+                                similarity = face["matches"][0]["similarity"]
+                                detection_score = face["detection_score"]
 
-                                combined_score = (similarity * 0.7) + (detection_score * 0.3)
+                                combined_score = (similarity * 0.7) + (
+                                    detection_score * 0.3
+                                )
 
                                 if person_id not in person_best_match:
                                     person_best_match[person_id] = (i, combined_score)
                                 else:
                                     if combined_score > person_best_match[person_id][1]:
-                                        person_best_match[person_id] = (i, combined_score)
+                                        person_best_match[person_id] = (
+                                            i,
+                                            combined_score,
+                                        )
 
                         best_indices = {idx for idx, _ in person_best_match.values()}
                         for i, face in enumerate(faces):
-                            if face['identified'] and i not in best_indices:
-                                face['matches'] = []
-                                face['identified'] = False
+                            if face["identified"] and i not in best_indices:
+                                face["matches"] = []
+                                face["identified"] = False
 
                     last_faces = faces
 
             annotated = frame.copy()
             for face in last_faces:
-                bbox = face['bbox']
+                bbox = face["bbox"]
                 x1, y1, x2, y2 = [int(v) for v in bbox]
 
-                if face['identified']:
+                if face["identified"]:
                     color = (0, 255, 0)
-                    name = face['matches'][0]['name']
-                    similarity = face['matches'][0]['similarity']
+                    name = face["matches"][0]["name"]
+                    similarity = face["matches"][0]["similarity"]
                     label = f"{name} ({similarity:.2f})"
                 else:
                     color = (0, 0, 255)
@@ -1005,10 +1053,17 @@ def detection_thread(camera_id, scrfd, arcface, db, skip_frames=1, threshold=0.4
 
                 (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
                 cv2.rectangle(annotated, (x1, y1 - h - 10), (x1 + w, y1), color, -1)
-                cv2.putText(annotated, label, (x1, y1 - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x1, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2,
+                )
 
-                for lx, ly in face['landmarks']:
+                for lx, ly in face["landmarks"]:
                     cv2.circle(annotated, (int(lx), int(ly)), 2, (255, 0, 0), -1)
 
             with lock:
@@ -1035,27 +1090,29 @@ def generate_frames():
             if not flag:
                 continue
 
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' +
-               bytearray(encoded_image) + b'\r\n')
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + bytearray(encoded_image) + b"\r\n"
+        )
 
         time.sleep(0.033)
 
 
-@app.route('/')
+@app.route("/")
 def index():
     """Main page."""
     return render_template_string(HTML_TEMPLATE)
 
 
-@app.route('/video_feed')
+@app.route("/video_feed")
 def video_feed():
     """Video streaming route."""
-    return Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(
+        generate_frames(), mimetype="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
-@app.route('/get_faces')
+@app.route("/get_faces")
 def get_faces():
     """Get current detected faces."""
     global face_results, lock, database
@@ -1063,25 +1120,23 @@ def get_faces():
     with lock:
         faces = [
             {
-                'bbox': f['bbox'],
-                'detection_score': f['detection_score'],
-                'matches': f['matches'],
-                'identified': f['identified']
+                "bbox": f["bbox"],
+                "detection_score": f["detection_score"],
+                "matches": f["matches"],
+                "identified": f["identified"],
             }
             for f in face_results
         ]
 
-    return jsonify({
-        'faces': faces,
-        'db_size': len(database)
-    })
+    return jsonify({"faces": faces, "db_size": len(database)})
 
 
-IMG_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
+IMG_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
-def build_database_from_folder(datasets_dir: str, scrfd: SCRFD, arcface: ArcFace,
-                                database: FaceDatabase) -> None:
+def build_database_from_folder(
+    datasets_dir: str, scrfd: SCRFD, arcface: ArcFace, database: FaceDatabase
+) -> None:
     """
     Pre-build face database from a datasets folder.
 
@@ -1105,7 +1160,9 @@ def build_database_from_folder(datasets_dir: str, scrfd: SCRFD, arcface: ArcFace
     """
     datasets_path = Path(datasets_dir)
     if not datasets_path.exists():
-        print(f"  ⚠ Datasets folder not found: {datasets_dir} — skipping pre-enrollment")
+        print(
+            f"  ⚠ Datasets folder not found: {datasets_dir} — skipping pre-enrollment"
+        )
         return
 
     person_dirs = sorted([d for d in datasets_path.iterdir() if d.is_dir()])
@@ -1120,15 +1177,18 @@ def build_database_from_folder(datasets_dir: str, scrfd: SCRFD, arcface: ArcFace
 
     for person_dir in person_dirs:
         name = person_dir.name
-        person_id = name.lower().replace(' ', '_')
+        person_id = name.lower().replace(" ", "_")
 
         # Skip if person already enrolled
         if database.get_person(person_id) is not None:
             print(f"  [{name}] already in database — skipped")
             continue
 
-        files = [f for f in sorted(person_dir.iterdir())
-                 if f.suffix.lower() in IMG_EXTENSIONS]
+        files = [
+            f
+            for f in sorted(person_dir.iterdir())
+            if f.suffix.lower() in IMG_EXTENSIONS
+        ]
         if not files:
             print(f"  [{name}] no images found — skipped")
             continue
@@ -1152,8 +1212,8 @@ def build_database_from_folder(datasets_dir: str, scrfd: SCRFD, arcface: ArcFace
                 continue
 
             # Pick highest-score detection
-            best = max(detections, key=lambda d: d['score'])
-            x1, y1, x2, y2 = [int(v) for v in best['bbox']]
+            best = max(detections, key=lambda d: d["score"])
+            x1, y1, x2, y2 = [int(v) for v in best["bbox"]]
             h, w = img_bgr.shape[:2]
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(w, x2), min(h, y2)
@@ -1186,23 +1246,37 @@ def build_database_from_folder(datasets_dir: str, scrfd: SCRFD, arcface: ArcFace
 def main():
     global scrfd_model, arcface_model, database
 
-    parser = argparse.ArgumentParser(description='Web-Based Face Recognition System')
-    parser.add_argument('--camera', type=int, default=0, help='Camera ID')
-    parser.add_argument('--db-path', default='face_database', help='Database directory')
-    parser.add_argument('--datasets', default='', help='Path to datasets folder (sub-folders = person names)')
-    parser.add_argument('--scrfd-dlc', default='../SCRFD (Face Detection)/Model/scrfd_quantized_6490.dlc')
-    parser.add_argument('--arcface-dlc', default='../ArcFace (Face Recognition)/Model/arcface_quantized_6490.dlc')
-    parser.add_argument('--runtime', default='DSP', choices=['CPU', 'DSP'])
-    parser.add_argument('--threshold', type=float, default=0.4, help='Similarity threshold')
-    parser.add_argument('--skip-frames', type=int, default=1, help='Process every N frames')
-    parser.add_argument('--host', default='0.0.0.0', help='Web server host')
-    parser.add_argument('--port', type=int, default=5000, help='Web server port')
+    parser = argparse.ArgumentParser(description="Web-Based Face Recognition System")
+    parser.add_argument("--camera", type=int, default=0, help="Camera ID")
+    parser.add_argument("--db-path", default="face_database", help="Database directory")
+    parser.add_argument(
+        "--datasets",
+        default="",
+        help="Path to datasets folder (sub-folders = person names)",
+    )
+    parser.add_argument(
+        "--scrfd-dlc", default="../SCRFD (Face Detection)/Model/scrfd.dlc"
+    )
+    # parser.add_argument('--scrfd-dlc', default='../SCRFD (Face Detection)/Model/scrfd_quantized_6490.dlc')
+    parser.add_argument(
+        "--arcface-dlc",
+        default="../ArcFace (Face Recognition)/Model/arcface_quantized_6490.dlc",
+    )
+    parser.add_argument("--runtime", default="DSP", choices=["CPU", "DSP"])
+    parser.add_argument(
+        "--threshold", type=float, default=0.4, help="Similarity threshold"
+    )
+    parser.add_argument(
+        "--skip-frames", type=int, default=1, help="Process every N frames"
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Web server host")
+    parser.add_argument("--port", type=int, default=5000, help="Web server port")
 
     args = parser.parse_args()
 
-    print("="*60)
+    print("=" * 60)
     print("Web-Based Face Recognition System")
-    print("="*60)
+    print("=" * 60)
 
     # Initialize database
     print("\nInitializing database...")
@@ -1211,23 +1285,25 @@ def main():
 
     # Initialize models
     print("\nInitializing models...")
-    runtime = Runtime.DSP if args.runtime == 'DSP' else Runtime.CPU
+    runtime = Runtime.DSP if args.runtime == "DSP" else Runtime.CPU
 
     scrfd_model = SCRFD(
         dlc_path=args.scrfd_dlc,
         input_layers=["input.1"],
         output_layers=[
-            "Sigmoid_141", "Reshape_144", "Reshape_147",
-            "Sigmoid_159", "Reshape_162", "Reshape_165",
-            "Sigmoid_177", "Reshape_180", "Reshape_183"
+            "Sigmoid_141",
+            "Reshape_144",
+            "Reshape_147",
+            "Sigmoid_159",
+            "Reshape_162",
+            "Reshape_165",
+            "Sigmoid_177",
+            "Reshape_180",
+            "Reshape_183",
         ],
-        output_tensors=[
-            "446", "449", "452",
-            "466", "469", "472",
-            "486", "489", "492"
-        ],
+        output_tensors=["446", "449", "452", "466", "469", "472", "486", "489", "492"],
         runtime=runtime,
-        profile_level=PerfProfile.BURST
+        profile_level=PerfProfile.BURST,
     )
 
     arcface_model = ArcFace(
@@ -1236,7 +1312,7 @@ def main():
         output_layers=["pre_fc1"],
         output_tensors=["fc1"],
         runtime=runtime,
-        profile_level=PerfProfile.BURST
+        profile_level=PerfProfile.BURST,
     )
 
     if not scrfd_model.Initialize():
@@ -1258,8 +1334,15 @@ def main():
     print("\nStarting webcam detection...")
     detection_process = threading.Thread(
         target=detection_thread,
-        args=(args.camera, scrfd_model, arcface_model, database, args.skip_frames, args.threshold),
-        daemon=True
+        args=(
+            args.camera,
+            scrfd_model,
+            arcface_model,
+            database,
+            args.skip_frames,
+            args.threshold,
+        ),
+        daemon=True,
     )
     detection_process.start()
 
@@ -1280,6 +1363,7 @@ def main():
     except KeyboardInterrupt:
         print("\n\nShutting down...")
     return 0
+
 
 if __name__ == "__main__":
     exit(main())
