@@ -15,6 +15,10 @@ Usage:
         --datasets   /path/to/datasets \\
         --detector   /path/to/FaceDetector.onnx \\
         --cavaface   /path/to/cavaface.onnx
+        
+    
+    ****** Command usage ******    
+     python web_local.py --datasets ../datasets --detector ../models/cavaface-onnx-float/FaceDetector.onnx --cavaface ../models/cavaface-onnx-float/cavaface.onnx 
 
     Then open: http://localhost:5000
 """
