@@ -226,7 +226,11 @@ class FaceDB:
 # Pre-enrollment from datasets folder  
 # =============================================================================  
   
-def build_database_from_folder(datasets_dir, det_sess, anchors, cava_sess, db):  
+def build_database_from_folder(datasets_dir: str,  
+                                det_sess: ort.InferenceSession,  
+                                anchors: np.ndarray,  
+                                cava_sess: ort.InferenceSession,  
+                                db: FaceDB) -> None:  
     datasets_path = Path(datasets_dir)  
     if not datasets_path.exists():  
         print(f"  ⚠ Datasets folder not found: {datasets_dir}")  
@@ -281,11 +285,9 @@ def build_database_from_folder(datasets_dir, det_sess, anchors, cava_sess, db):
   
     print(f"Pre-enrollment done: {enrolled} person(s) added")  
     print(f"Total in database  : {len(db)} person(s)")  
-    print("-" * 40)  
-  
-  
-# =============================================================================  
-# HTML Template — with Start/Stop Scanning + Edge Light  
+    print("-" * 40)
+    # =============================================================================  
+# HTML Template (with Start/Stop Scanning + Edge Light)  
 # =============================================================================  
   
 HTML_TEMPLATE = """  
@@ -326,12 +328,12 @@ h1 { text-align: center; font-size: 2.4rem; font-weight: 700; }
 }  
 @media (max-width: 1024px) { .main-content { grid-template-columns: 1fr; } }  
 .video-panel {  
-    position: relative;  
     background: var(--glass);  
     padding: 16px;  
     border: 1px solid var(--border);  
     backdrop-filter: blur(16px);  
     box-shadow: 0 20px 60px rgba(0,0,0,.35);  
+    position: relative;  
     transition: box-shadow .4s ease, border-color .4s ease;  
 }  
 .video-panel.edge-green {  
@@ -346,7 +348,41 @@ h1 { text-align: center; font-size: 2.4rem; font-weight: 700; }
     box-shadow: 0 0 30px 8px rgba(99,102,241,.6), inset 0 0 30px 4px rgba(99,102,241,.15);  
     border-color: rgba(99,102,241,.5);  
 }  
+.video-panel img {  
+    width: 100%;  
+    border-radius: 12px;  
+    min-height: 300px;  
+    background: #0d0d1a;  
+    object-fit: contain;  
+}
 #videoStream { width: 100%; background: #000; display: block; }  
+.scan-overlay {  
+    position: absolute;  
+    top: 16px; left: 16px; right: 16px; bottom: 16px;  
+    background: rgba(0,0,0,.55);  
+    display: flex;  
+    align-items: center;  
+    justify-content: center;  
+    z-index: 10;  
+}  
+.btn-scan {  
+    background: var(--primary);  
+    color: #fff;  
+    border: none;  
+    padding: 14px 36px;  
+    font-size: 1.1rem;  
+    font-weight: 600;  
+    border-radius: 8px;  
+    cursor: pointer;  
+    transition: background .2s;  
+}  
+.btn-scan:hover { background: #4f46e5; }  
+.btn-stop {  
+    background: var(--danger);  
+    padding: 10px 28px;  
+    font-size: .95rem;  
+}  
+.btn-stop:hover { background: #dc2626; }  
 .faces-panel {  
     background: var(--glass);  
     padding: 20px;  
@@ -401,31 +437,6 @@ h1 { text-align: center; font-size: 2.4rem; font-weight: 700; }
     vertical-align: middle;  
     letter-spacing: .05em;  
 }  
-.scan-overlay {  
-    position: absolute;  
-    top: 16px; left: 16px; right: 16px; bottom: 16px;  
-    display: flex;  
-    align-items: center;  
-    justify-content: center;  
-    background: rgba(0,0,0,.55);  
-    z-index: 10;  
-}  
-.btn-scan {  
-    display: inline-block;  
-    padding: 14px 36px;  
-    font-size: 1.1rem;  
-    font-weight: 600;  
-    color: #fff;  
-    background: var(--primary);  
-    border: none;  
-    border-radius: 8px;  
-    cursor: pointer;  
-    letter-spacing: .04em;  
-    transition: background .2s, transform .15s;  
-}  
-.btn-scan:hover { background: #4f46e5; transform: translateY(-2px); }  
-.btn-stop { background: var(--danger); padding: 10px 28px; font-size: .95rem; }  
-.btn-stop:hover { background: #dc2626; }  
 </style>  
 </head>  
 <body>  
@@ -462,10 +473,9 @@ h1 { text-align: center; font-size: 2.4rem; font-weight: 700; }
 </div>  
   
 <script>  
+const facesList  = document.getElementById('facesList');  
 const facesCount = document.getElementById('facesCount');  
 const dbCount    = document.getElementById('dbCount');  
-const facesList  = document.getElementById('facesList');  
-const videoPanel = document.getElementById('videoPanel');  
 let pollTimer = null;  
   
 function updateFaces() {  
@@ -495,13 +505,14 @@ function updateFaces() {
                 `).join('');  
   
             // Edge Light  
-            videoPanel.classList.remove('edge-green', 'edge-red', 'edge-blue');  
+            const panel = document.getElementById('videoPanel');  
+            panel.classList.remove('edge-green', 'edge-red', 'edge-blue');  
             if (data.faces.length > 0) {  
                 const hasIdentified = data.faces.some(f => f.identified);  
                 const hasUnknown    = data.faces.some(f => !f.identified);  
-                if (hasIdentified && !hasUnknown)      videoPanel.classList.add('edge-green');  
-                else if (!hasIdentified && hasUnknown)  videoPanel.classList.add('edge-red');  
-                else                                    videoPanel.classList.add('edge-blue');  
+                if (hasIdentified && !hasUnknown)      panel.classList.add('edge-green');  
+                else if (!hasIdentified && hasUnknown)  panel.classList.add('edge-red');  
+                else                                    panel.classList.add('edge-blue');  
             }  
         });  
 }  
@@ -519,20 +530,23 @@ function stopScanning() {
     document.getElementById('videoStream').src = '';  
     document.getElementById('scanOverlay').style.display = 'flex';  
     document.getElementById('btnStop').style.display = 'none';  
-    videoPanel.classList.remove('edge-green', 'edge-red', 'edge-blue');  
+    document.getElementById('videoPanel').classList.remove('edge-green', 'edge-red', 'edge-blue');  
     facesList.innerHTML = '<div style="opacity:.6;text-align:center">Scanning stopped</div>';  
     facesCount.textContent = '--';  
 }  
 </script>  
 </body>  
 </html>  
-"""
+"""  
+  
+  
 # =============================================================================  
 # Flask App + Detection Thread  
 # =============================================================================  
   
 app          = Flask(__name__)  
 output_frame = None  
+raw_frame    = None  
 lock         = threading.Lock()  
 face_results = []  
   
@@ -543,7 +557,7 @@ db_g         = None
   
   
 def detection_thread(camera_id: int, threshold: float, skip_frames: int = 1) -> None:  
-    global output_frame, lock, face_results  
+    global output_frame, raw_frame, lock, face_results  
   
     cap = cv2.VideoCapture(camera_id)  
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  
@@ -562,6 +576,9 @@ def detection_thread(camera_id: int, threshold: float, skip_frames: int = 1) -> 
         if not ret:  
             time.sleep(0.05)  
             continue  
+  
+        with lock:  
+            raw_frame = frame.copy()  
   
         frame_count += 1  
   
@@ -646,6 +663,22 @@ def generate_frames():
         time.sleep(0.033)  
   
   
+def generate_raw_frames():  
+    global raw_frame, lock  
+    while True:  
+        with lock:  
+            if raw_frame is None:  
+                time.sleep(0.05)  
+                continue  
+            ok, encoded = cv2.imencode(".jpg", raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])  
+            if not ok:  
+                continue  
+            frame_bytes = bytearray(encoded)  
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"  
+               + frame_bytes + b"\r\n")  
+        time.sleep(0.033)  
+  
+  
 @app.route("/")  
 def index():  
     return render_template_string(HTML_TEMPLATE)  
@@ -672,6 +705,38 @@ def get_faces():
             for f in face_results  
         ]  
     return jsonify({"faces": faces, "db_size": len(db_g)})  
+  
+  
+@app.route("/raw_feed")  
+def raw_feed():  
+    return Response(generate_raw_frames(),  
+                    mimetype="multipart/x-mixed-replace; boundary=frame")  
+  
+  
+@app.route("/test_camera")  
+def test_camera_page():  
+    return render_template_string("""  
+    <!DOCTYPE html>  
+    <html>  
+    <head>  
+        <title>Camera Test</title>  
+        <style>  
+            body { background: #1a1a2e; color: #eee; font-family: sans-serif;  
+                   display: flex; flex-direction: column; align-items: center;  
+                   padding: 40px; }  
+            h1 { margin-bottom: 8px; }  
+            p  { opacity: .6; margin-bottom: 20px; }  
+            img { max-width: 100%; border-radius: 12px;  
+                  border: 2px solid #333; }  
+        </style>  
+    </head>  
+    <body>  
+        <h1>Camera Test</h1>  
+        <p>Raw feed &mdash; no face detection / recognition processing</p>  
+        <img src="/raw_feed">  
+    </body>  
+    </html>  
+    """)  
   
   
 # =============================================================================  
@@ -706,6 +771,7 @@ def main():
     print("Face Recognition System  [LOCAL / ONNX]")  
     print("=" * 60)  
   
+    # Load models  
     print("\nLoading models ...")  
     if not Path(args.detector).exists():  
         print(f"  ✗ FaceDetector not found: {args.detector}")  
@@ -732,6 +798,7 @@ def main():
   
     anchors_g = generate_anchors()  
   
+    # Load / build database  
     print("\nInitializing database ...")  
     db_g = FaceDB(args.db)  
   
@@ -747,6 +814,7 @@ def main():
     else:  
         print(f"  ✓ Database ready: {list(db_g.embeddings.keys())}")  
   
+    # Start detection thread  
     print("\nStarting camera ...")  
     t = threading.Thread(  
         target=detection_thread,  
@@ -759,6 +827,7 @@ def main():
     print(f"\n{'='*60}")  
     print("  Open your browser:")  
     print(f"  http://localhost:{args.port}")  
+    print(f"  Camera test: http://localhost:{args.port}/test_camera")  
     print(f"\n  Press Ctrl+C to stop")  
     print(f"{'='*60}\n")  
   
