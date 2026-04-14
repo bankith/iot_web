@@ -1,3 +1,4 @@
+# Face Detection + Face Recognition/web_local.py  
 """  
 web_local.py — Face Detection + Recognition (Mac / Local version)  
   
@@ -16,15 +17,15 @@ Usage:
         --detector   /path/to/FaceDetector.onnx \\  
         --cavaface   /path/to/cavaface.onnx  
   
-  
     ****** Command usage ******  
      python web_local.py --datasets ../datasets --detector ../models/cavaface-onnx-float/FaceDetector.onnx --cavaface ../models/cavaface-onnx-float/cavaface.onnx  
   
-    Then open: http://localhost:5000  
+    Then open: http://localhost:5001  
 """  
   
 import argparse  
 import os  
+import random  
 import threading  
 import time  
 from pathlib import Path  
@@ -32,7 +33,7 @@ from pathlib import Path
 import cv2  
 import numpy as np  
 import onnxruntime as ort  
-from flask import Flask, Response, jsonify, render_template_string  
+from flask import Flask, Response, jsonify, render_template_string, request  
   
 # =============================================================================  
 # Constants  
@@ -223,6 +224,105 @@ class FaceDB:
   
   
 # =============================================================================  
+# Finger Counter (pure OpenCV — works on Mac)  
+# =============================================================================  
+  
+class FingerCounter:  
+    """  
+    OpenCV-based finger counter using skin color segmentation,  
+    convex hull, and convexity defects. No ML model needed.  
+    """  
+  
+    def __init__(self, roi_x=0.55, roi_y=0.1, roi_w=0.4, roi_h=0.6):  
+        self.roi_x = roi_x  
+        self.roi_y = roi_y  
+        self.roi_w = roi_w  
+        self.roi_h = roi_h  
+        self.lower_skin = np.array([0, 30, 60], dtype=np.uint8)  
+        self.upper_skin = np.array([20, 150, 255], dtype=np.uint8)  
+        self.lower_skin2 = np.array([160, 30, 60], dtype=np.uint8)  
+        self.upper_skin2 = np.array([180, 150, 255], dtype=np.uint8)  
+  
+    def get_roi(self, frame):  
+        h, w = frame.shape[:2]  
+        x1 = int(w * self.roi_x)  
+        y1 = int(h * self.roi_y)  
+        x2 = int(w * (self.roi_x + self.roi_w))  
+        y2 = int(h * (self.roi_y + self.roi_h))  
+        return x1, y1, x2, y2  
+  
+    def count_fingers(self, frame):  
+        h, w = frame.shape[:2]  
+        rx1, ry1, rx2, ry2 = self.get_roi(frame)  
+        roi = frame[ry1:ry2, rx1:rx2]  
+        if roi.size == 0:  
+            return -1, {}  
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)  
+        mask1 = cv2.inRange(hsv, self.lower_skin, self.upper_skin)  
+        mask2 = cv2.inRange(hsv, self.lower_skin2, self.upper_skin2)  
+        skin_mask = cv2.bitwise_or(mask1, mask2)  
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))  
+        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel, iterations=2)  
+        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel, iterations=1)  
+        skin_mask = cv2.GaussianBlur(skin_mask, (5, 5), 0)  
+        contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  
+        if not contours:  
+            return -1, {"mask": skin_mask}  
+        max_contour = max(contours, key=cv2.contourArea)  
+        area = cv2.contourArea(max_contour)  
+        roi_area = (rx2 - rx1) * (ry2 - ry1)  
+        if area < roi_area * 0.05:  
+            return -1, {"mask": skin_mask, "area": area}  
+        hull = cv2.convexHull(max_contour, returnPoints=False)  
+        if len(hull) < 3:  
+            return 0, {"mask": skin_mask, "contour": max_contour}  
+        try:  
+            defects = cv2.convexityDefects(max_contour, hull)  
+        except cv2.error:  
+            return 0, {"mask": skin_mask, "contour": max_contour}  
+        if defects is None:  
+            return 0, {"mask": skin_mask, "contour": max_contour}  
+        finger_count = 0  
+        for i in range(defects.shape[0]):  
+            s, e, f, d = defects[i, 0]  
+            start = tuple(max_contour[s][0])  
+            end = tuple(max_contour[e][0])  
+            far = tuple(max_contour[f][0])  
+            a = np.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)  
+            b = np.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)  
+            c = np.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)  
+            if b * c == 0:  
+                continue  
+            angle = np.arccos((b**2 + c**2 - a**2) / (2 * b * c))  
+            depth = d / 256.0  
+            if angle <= np.pi / 2 and depth > 30:  
+                finger_count += 1  
+        finger_count = min(finger_count + 1, 5)  
+        hull_area = cv2.contourArea(cv2.convexHull(max_contour))  
+        solidity = area / hull_area if hull_area > 0 else 0  
+        if solidity > 0.9 and finger_count <= 1:  
+            finger_count = 0  
+        return finger_count, {  
+            "mask": skin_mask, "contour": max_contour,  
+            "defects": defects, "area": area, "solidity": solidity,  
+        }  
+  
+    def draw_roi(self, frame, finger_count=-1, active=False):  
+        rx1, ry1, rx2, ry2 = self.get_roi(frame)  
+        color = (0, 255, 255) if active else (128, 128, 128)  
+        thickness = 3 if active else 1  
+        cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), color, thickness)  
+        if active and finger_count >= 0:  
+            label = f"Fingers: {finger_count}"  
+            cv2.putText(frame, label, (rx1 + 10, ry1 + 40),  
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)  
+        elif active:  
+            cv2.putText(frame, "Show hand here", (rx1 + 10, ry1 + 40),  
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)  
+        return frame  
+  
+  
+# =============================================================================  
 # Pre-enrollment from datasets folder  
 # =============================================================================  
   
@@ -235,15 +335,12 @@ def build_database_from_folder(datasets_dir: str,
     if not datasets_path.exists():  
         print(f"  ⚠ Datasets folder not found: {datasets_dir}")  
         return  
-  
     person_dirs = sorted([d for d in datasets_path.iterdir() if d.is_dir()])  
     if not person_dirs:  
         print(f"  ⚠ No sub-folders found in {datasets_dir}")  
         return  
-  
     print(f"\nBuilding database from: {datasets_dir}")  
     print("-" * 40)  
-  
     enrolled = 0  
     for person_dir in person_dirs:  
         name  = person_dir.name  
@@ -252,7 +349,6 @@ def build_database_from_folder(datasets_dir: str,
         if not files:  
             print(f"  [{name}] no images — skipped")  
             continue  
-  
         embeddings = []  
         for img_path in files:  
             img_bgr = cv2.imread(str(img_path))  
@@ -260,20 +356,16 @@ def build_database_from_folder(datasets_dir: str,
                 continue  
             img_rgb   = img_bgr[:, :, ::-1]  
             detections = detect_faces(img_rgb, det_sess, anchors)  
-  
             if not detections:  
                 print(f"  [{name}] no face in {img_path.name} — skipped")  
                 continue  
-  
             best  = max(detections, key=lambda d: d["score"])  
             aligned = best["aligned"]  
             if aligned is None:  
                 continue  
-  
             emb = get_embedding(aligned, cava_sess)  
             embeddings.append(emb)  
             print(f"  [{name}] {img_path.name} ✓")  
-  
         if embeddings:  
             avg = np.mean(embeddings, axis=0)  
             avg /= np.linalg.norm(avg) + 1e-8  
@@ -282,12 +374,13 @@ def build_database_from_folder(datasets_dir: str,
             enrolled += 1  
         else:  
             print(f"  [{name}] no valid faces — not enrolled\n")  
-  
     print(f"Pre-enrollment done: {enrolled} person(s) added")  
     print(f"Total in database  : {len(db)} person(s)")  
-    print("-" * 40)
-    # =============================================================================  
-# HTML Template (with Start/Stop Scanning + Edge Light)  
+    print("-" * 40)  
+  
+  
+# =============================================================================  
+# HTML Template  
 # =============================================================================  
   
 HTML_TEMPLATE = """  
@@ -327,6 +420,87 @@ h1 { text-align: center; font-size: 2.4rem; font-weight: 700; }
     gap: 24px;  
 }  
 @media (max-width: 1024px) { .main-content { grid-template-columns: 1fr; } }  
+  
+/* Challenge overlay */  
+.challenge-overlay {  
+    position: fixed;  
+    top: 0; left: 0; right: 0; bottom: 0;  
+    background: rgba(15,23,42,0.85);  
+    display: flex;  
+    align-items: center;  
+    justify-content: center;  
+    z-index: 100;  
+}  
+.challenge-card {  
+    background: var(--bg-2);  
+    border: 2px solid var(--primary);  
+    border-radius: 16px;  
+    padding: 40px;  
+    text-align: center;  
+    max-width: 500px;  
+    width: 90%;  
+}  
+.challenge-question {  
+    font-size: 3rem;  
+    font-weight: 700;  
+    margin: 20px 0;  
+    color: #fff;  
+}  
+.challenge-fingers {  
+    font-size: 2rem;  
+    margin: 16px 0;  
+    color: var(--text-sub);  
+}  
+.challenge-timer {  
+    font-size: 1.2rem;  
+    color: var(--text-sub);  
+    margin-top: 12px;  
+}  
+.challenge-result {  
+    font-size: 1.5rem;  
+    font-weight: 600;  
+    margin-top: 16px;  
+    padding: 12px 24px;  
+    border-radius: 8px;  
+}  
+.challenge-result.correct {  
+    background: rgba(34,197,94,0.2);  
+    color: #22c55e;  
+    border: 1px solid #22c55e;  
+}  
+.challenge-result.wrong {  
+    background: rgba(239,68,68,0.2);  
+    color: #ef4444;  
+    border: 1px solid #ef4444;  
+}  
+.challenge-result.timeout {  
+    background: rgba(234,179,8,0.2);  
+    color: #eab308;  
+    border: 1px solid #eab308;  
+}  
+.video-panel.edge-gold {  
+    box-shadow: 0 0 30px 8px rgba(234,179,8,.6),  
+                inset 0 0 30px 4px rgba(234,179,8,.15);  
+    border-color: rgba(234,179,8,.5);  
+}  
+.btn-verify {  
+    background: #eab308;  
+    color: #000;  
+    border: none;  
+    padding: 4px 12px;  
+    font-size: .8rem;  
+    font-weight: 600;  
+    border-radius: 6px;  
+    cursor: pointer;  
+    margin-left: 8px;  
+}  
+.btn-verify:hover { background: #ca8a04; }  
+.hand-hint {  
+    font-size: .85rem;  
+    color: var(--text-sub);  
+    margin-top: 8px;  
+}  
+  
 .video-panel {  
     background: var(--glass);  
     padding: 16px;  
@@ -354,7 +528,7 @@ h1 { text-align: center; font-size: 2.4rem; font-weight: 700; }
     min-height: 300px;  
     background: #0d0d1a;  
     object-fit: contain;  
-}
+}  
 #videoStream { width: 100%; background: #000; display: block; }  
 .scan-overlay {  
     position: absolute;  
@@ -470,6 +644,21 @@ h1 { text-align: center; font-size: 2.4rem; font-weight: 700; }
             <div class="stat-value" id="facesCount">--</div>  
         </div>  
     </div>  
+  
+    <!-- Challenge Overlay -->
+    <div class="challenge-overlay" id="challengeOverlay" style="display:none;">  
+        <div class="challenge-card">  
+            <h2>Hand Verification</h2>  
+            <p style="color:var(--text-sub)">Verifying: <strong id="challengePerson"></strong></p>  
+            <div class="challenge-question" id="challengeQuestion"></div>  
+            <div class="challenge-fingers">  
+                Detected fingers: <span id="challengeFingers">--</span>  
+            </div>  
+            <div class="challenge-timer" id="challengeTimer"></div>  
+            <div id="challengeResult"></div>  
+            <button class="btn-scan" onclick="resetChallenge()" style="margin-top:20px;" id="challengeCloseBtn">Close</button>  
+        </div>  
+    </div>  
 </div>  
   
 <script>  
@@ -497,6 +686,10 @@ function updateFaces() {
                                 ? '<div class="face-similarity">' + (face.similarity * 100).toFixed(1) + '%</div>'  
                                 : '<div class="face-similarity" style="color:var(--danger)">Not in DB</div>'  
                             }  
+                            ${face.identified  
+                                ? `<button class="btn-verify" onclick="startChallenge('${face.name}')">Verify</button>`  
+                                : ''  
+                            }  
                         </div>  
                         <div style="font-size:.85rem;opacity:.7">  
                             Score: ${face.detection_score.toFixed(3)}  
@@ -517,6 +710,63 @@ function updateFaces() {
         });  
 }  
   
+let challengeTimer = null;  
+  
+function startChallenge(person) {  
+    fetch('/start_challenge', {  
+        method: 'POST',  
+        headers: {'Content-Type': 'application/json'},  
+        body: JSON.stringify({person: person})  
+    })  
+    .then(r => r.json())  
+    .then(data => {  
+        document.getElementById('challengeOverlay').style.display = 'flex';  
+        document.getElementById('challengePerson').textContent = data.person;  
+        document.getElementById('challengeQuestion').textContent = data.question;  
+        document.getElementById('challengeFingers').textContent = '--';  
+        document.getElementById('challengeResult').innerHTML = '';  
+        document.getElementById('challengeResult').className = 'challenge-result';  
+  
+        if (challengeTimer) clearInterval(challengeTimer);  
+        challengeTimer = setInterval(pollChallenge, 500);  
+    });  
+}  
+  
+function pollChallenge() {  
+    fetch('/get_challenge')  
+    .then(r => r.json())  
+    .then(data => {  
+        document.getElementById('challengeFingers').textContent =  
+            data.detected_fingers >= 0 ? data.detected_fingers : '--';  
+        document.getElementById('challengeTimer').textContent =  
+            data.status === 'active' ? `Time remaining: ${data.remaining}s` : '';  
+  
+        if (data.status === 'correct') {  
+            clearInterval(challengeTimer);  
+            document.getElementById('challengeResult').innerHTML = 'VERIFIED — Correct!';  
+            document.getElementById('challengeResult').className = 'challenge-result correct';  
+            document.getElementById('videoPanel').classList.remove('edge-green','edge-red','edge-blue');  
+            document.getElementById('videoPanel').classList.add('edge-gold');  
+        } else if (data.status === 'wrong') {  
+            clearInterval(challengeTimer);  
+            document.getElementById('challengeResult').innerHTML =  
+                `WRONG — You showed ${data.detected_fingers}, expected ${data.expected_answer}`;  
+            document.getElementById('challengeResult').className = 'challenge-result wrong';  
+        } else if (data.status === 'timeout') {  
+            clearInterval(challengeTimer);  
+            document.getElementById('challengeResult').innerHTML = 'TIMEOUT — Too slow!';  
+            document.getElementById('challengeResult').className = 'challenge-result timeout';  
+        }  
+    });  
+}  
+  
+function resetChallenge() {  
+    if (challengeTimer) clearInterval(challengeTimer);  
+    fetch('/reset_challenge', {method: 'POST'});  
+    document.getElementById('challengeOverlay').style.display = 'none';  
+    document.getElementById('videoPanel').classList.remove('edge-gold');  
+}  
+  
 function startScanning() {  
     document.getElementById('videoStream').src = '/video_feed';  
     document.getElementById('scanOverlay').style.display = 'none';  
@@ -530,7 +780,7 @@ function stopScanning() {
     document.getElementById('videoStream').src = '';  
     document.getElementById('scanOverlay').style.display = 'flex';  
     document.getElementById('btnStop').style.display = 'none';  
-    document.getElementById('videoPanel').classList.remove('edge-green', 'edge-red', 'edge-blue');  
+    document.getElementById('videoPanel').classList.remove('edge-green', 'edge-red', 'edge-blue', 'edge-gold');  
     facesList.innerHTML = '<div style="opacity:.6;text-align:center">Scanning stopped</div>';  
     facesCount.textContent = '--';  
 }  
@@ -555,9 +805,26 @@ cava_sess_g  = None
 anchors_g    = None  
 db_g         = None  
   
+# Challenge state  
+challenge_active = False  
+challenge_question = ""  
+challenge_answer = -1  
+challenge_person = ""  
+challenge_detected_fingers = -1  
+challenge_status = "idle"  # idle, active, correct, wrong  
+challenge_start_time = 0  
+challenge_stable_count = 0  
+challenge_last_finger = -1  
+CHALLENGE_STABLE_THRESHOLD = 8  
+CHALLENGE_TIMEOUT = 15  
+  
+finger_counter = None  
+  
   
 def detection_thread(camera_id: int, threshold: float, skip_frames: int = 1) -> None:  
     global output_frame, raw_frame, lock, face_results  
+    global challenge_active, challenge_detected_fingers, challenge_status  
+    global challenge_stable_count, challenge_last_finger, challenge_answer  
   
     cap = cv2.VideoCapture(camera_id)  
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  
@@ -639,6 +906,32 @@ def detection_thread(camera_id: int, threshold: float, skip_frames: int = 1) -> 
             cv2.putText(annotated, label, (x1, y1 - 5),  
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)  
   
+        # --- Finger counting during active challenge ---  
+        if challenge_active and finger_counter is not None:  
+            finger_count, debug_info = finger_counter.count_fingers(frame)  
+            challenge_detected_fingers = finger_count  
+  
+            finger_counter.draw_roi(annotated, finger_count, active=True)  
+  
+            if finger_count >= 0:  
+                if finger_count == challenge_last_finger:  
+                    challenge_stable_count += 1  
+                else:  
+                    challenge_stable_count = 0  
+                    challenge_last_finger = finger_count  
+  
+                if challenge_stable_count >= CHALLENGE_STABLE_THRESHOLD and challenge_status == "active":  
+                    if finger_count == challenge_answer:  
+                        challenge_status = "correct"  
+                        challenge_active = False  
+                    else:  
+                        challenge_status = "wrong"  
+                        challenge_active = False  
+            else:  
+                challenge_stable_count = 0  
+        elif finger_counter is not None:  
+            finger_counter.draw_roi(annotated, active=False)  
+  
         with lock:  
             output_frame = annotated.copy()  
             face_results = last_faces.copy()  
@@ -713,6 +1006,88 @@ def raw_feed():
                     mimetype="multipart/x-mixed-replace; boundary=frame")  
   
   
+# =============================================================================  
+# Challenge routes  
+# =============================================================================  
+  
+def generate_challenge():  
+    """Generate a simple math question whose answer is 0-5."""  
+    answer = random.randint(1, 5)  
+    op = random.choice(["add", "sub"])  
+    if op == "add":  
+        a = random.randint(0, answer)  
+        b = answer - a  
+        question = f"{a} + {b} = ?"  
+    else:  
+        a = random.randint(answer, 5)  
+        b = a - answer  
+        question = f"{a} - {b} = ?"  
+    return question, answer  
+  
+  
+@app.route("/start_challenge", methods=["POST"])  
+def start_challenge():  
+    global challenge_active, challenge_question, challenge_answer  
+    global challenge_person, challenge_status, challenge_start_time  
+    global challenge_stable_count, challenge_last_finger, challenge_detected_fingers  
+  
+    data = request.get_json() or {}  
+    person = data.get("person", "unknown")  
+  
+    question, answer = generate_challenge()  
+    challenge_active = True  
+    challenge_question = question  
+    challenge_answer = answer  
+    challenge_person = person  
+    challenge_status = "active"  
+    challenge_start_time = time.time()  
+    challenge_stable_count = 0  
+    challenge_last_finger = -1  
+    challenge_detected_fingers = -1  
+  
+    return jsonify({  
+        "status": "active",  
+        "question": question,  
+        "person": person,  
+    })  
+  
+  
+@app.route("/get_challenge")  
+def get_challenge():  
+    global challenge_active, challenge_status, challenge_detected_fingers  
+    global challenge_question, challenge_answer, challenge_person, challenge_start_time  
+  
+    elapsed = time.time() - challenge_start_time if challenge_active else 0  
+    remaining = max(0, CHALLENGE_TIMEOUT - elapsed) if challenge_active else 0  
+  
+    if challenge_active and elapsed > CHALLENGE_TIMEOUT and challenge_status == "active":  
+        challenge_status = "timeout"  
+        challenge_active = False  
+  
+    return jsonify({  
+        "active": challenge_active,  
+        "status": challenge_status,  
+        "question": challenge_question,  
+        "person": challenge_person,  
+        "detected_fingers": challenge_detected_fingers,  
+        "expected_answer": challenge_answer if challenge_status != "active" else -1,  
+        "remaining": round(remaining, 1),  
+    })  
+  
+  
+@app.route("/reset_challenge", methods=["POST"])  
+def reset_challenge():  
+    global challenge_active, challenge_status, challenge_detected_fingers  
+    global challenge_question, challenge_answer, challenge_person  
+    challenge_active = False  
+    challenge_status = "idle"  
+    challenge_detected_fingers = -1  
+    challenge_question = ""  
+    challenge_answer = -1  
+    challenge_person = ""  
+    return jsonify({"status": "idle"})  
+  
+  
 @app.route("/test_camera")  
 def test_camera_page():  
     return render_template_string("""  
@@ -744,7 +1119,7 @@ def test_camera_page():
 # =============================================================================  
   
 def main():  
-    global det_sess_g, cava_sess_g, anchors_g, db_g  
+    global det_sess_g, cava_sess_g, anchors_g, db_g, finger_counter  
   
     parser = argparse.ArgumentParser(  
         description="Web-Based Face Recognition — Local (ONNX) version for Mac/Linux"  
@@ -797,6 +1172,10 @@ def main():
     print("  ✓ CavaFace loaded")  
   
     anchors_g = generate_anchors()  
+  
+    # Initialize finger counter  
+    finger_counter = FingerCounter()  
+    print("  ✓ FingerCounter initialized")  
   
     # Load / build database  
     print("\nInitializing database ...")  
