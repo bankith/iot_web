@@ -447,7 +447,157 @@ CHALLENGE_STABLE_THRESHOLD = 8  # need N consecutive same readings
 CHALLENGE_TIMEOUT = 15  # seconds  
   
 finger_counter = None
-  
+
+
+class FingerCounter:
+    """
+    OpenCV-based finger counter using skin color segmentation,
+    convex hull, and convexity defects. No ML model needed.
+    """
+
+    def __init__(self, roi_x=0.55, roi_y=0.1, roi_w=0.4, roi_h=0.6):
+        """
+        ROI defines where the user should place their hand (fraction of frame).
+        Default: right side of frame.
+        """
+        self.roi_x = roi_x
+        self.roi_y = roi_y
+        self.roi_w = roi_w
+        self.roi_h = roi_h
+
+        # HSV skin color range (tune if needed for different skin tones)
+        self.lower_skin = np.array([0, 30, 60], dtype=np.uint8)
+        self.upper_skin = np.array([20, 150, 255], dtype=np.uint8)
+
+        # Secondary range for darker/lighter skin
+        self.lower_skin2 = np.array([160, 30, 60], dtype=np.uint8)
+        self.upper_skin2 = np.array([180, 150, 255], dtype=np.uint8)
+
+    def get_roi(self, frame):
+        """Get the ROI rectangle coordinates for the given frame."""
+        h, w = frame.shape[:2]
+        x1 = int(w * self.roi_x)
+        y1 = int(h * self.roi_y)
+        x2 = int(w * (self.roi_x + self.roi_w))
+        y2 = int(h * (self.roi_y + self.roi_h))
+        return x1, y1, x2, y2
+
+    def count_fingers(self, frame):
+        """
+        Count the number of raised fingers in the ROI region.
+        Returns (finger_count, debug_info_dict).
+        finger_count: 0-5, or -1 if no hand detected.
+        """
+        h, w = frame.shape[:2]
+        rx1, ry1, rx2, ry2 = self.get_roi(frame)
+        roi = frame[ry1:ry2, rx1:rx2]
+
+        if roi.size == 0:
+            return -1, {}
+
+        # Convert to HSV and create skin mask
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        mask1 = cv2.inRange(hsv, self.lower_skin, self.upper_skin)
+        mask2 = cv2.inRange(hsv, self.lower_skin2, self.upper_skin2)
+        skin_mask = cv2.bitwise_or(mask1, mask2)
+
+        # Morphological operations to clean up
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        skin_mask = cv2.GaussianBlur(skin_mask, (5, 5), 0)
+
+        # Find contours
+        contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            return -1, {"mask": skin_mask}
+
+        # Get largest contour (assumed to be the hand)
+        max_contour = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(max_contour)
+        roi_area = (rx2 - rx1) * (ry2 - ry1)
+
+        # Hand should be at least 5% of ROI area
+        if area < roi_area * 0.05:
+            return -1, {"mask": skin_mask, "area": area}
+
+        # Convex hull
+        hull = cv2.convexHull(max_contour, returnPoints=False)
+          
+        if len(hull) < 3:
+            return 0, {"mask": skin_mask, "contour": max_contour}
+
+        # Convexity defects
+        try:
+            defects = cv2.convexityDefects(max_contour, hull)
+        except cv2.error:
+            return 0, {"mask": skin_mask, "contour": max_contour}
+
+        if defects is None:
+            return 0, {"mask": skin_mask, "contour": max_contour}
+
+        # Count fingers using convexity defects
+        # Each deep defect between fingers = one "valley"
+        # Number of fingers = number of valleys + 1
+        finger_count = 0
+        for i in range(defects.shape[0]):
+            s, e, f, d = defects[i, 0]
+            start = tuple(max_contour[s][0])
+            end = tuple(max_contour[e][0])
+            far = tuple(max_contour[f][0])
+
+            # Calculate triangle sides
+            a = np.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)
+            b = np.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)
+            c = np.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)
+
+            # Angle at the defect point (cosine rule)
+            if b * c == 0:
+                continue
+            angle = np.arccos((b**2 + c**2 - a**2) / (2 * b * c))
+
+            # Filter: angle < 90 degrees and defect depth > threshold
+            depth = d / 256.0  # depth is in fixed-point
+            if angle <= np.pi / 2 and depth > 30:
+                finger_count += 1
+
+        # valleys + 1 = fingers (but cap at 5)
+        finger_count = min(finger_count + 1, 5)
+
+        # If the contour area is very small relative to hull, might be a fist (0 fingers)
+        hull_area = cv2.contourArea(cv2.convexHull(max_contour))
+        solidity = area / hull_area if hull_area > 0 else 0
+          
+        # A closed fist has high solidity (>0.85), open hand has lower solidity
+        if solidity > 0.9 and finger_count <= 1:
+            finger_count = 0
+
+        return finger_count, {
+            "mask": skin_mask,
+            "contour": max_contour,
+            "defects": defects,
+            "area": area,
+            "solidity": solidity,
+        }
+
+    def draw_roi(self, frame, finger_count=-1, active=False):
+        """Draw the ROI rectangle and finger count on the frame."""
+        rx1, ry1, rx2, ry2 = self.get_roi(frame)
+        color = (0, 255, 255) if active else (128, 128, 128)
+        thickness = 3 if active else 1
+        cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), color, thickness)
+
+        if active and finger_count >= 0:
+            label = f"Fingers: {finger_count}"
+            cv2.putText(frame, label, (rx1 + 10, ry1 + 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
+        elif active:
+            cv2.putText(frame, "Show hand here", (rx1 + 10, ry1 + 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        return frame
+
+
 scrfd_model = None  
 arcface_model = None  
 database = None  
@@ -971,7 +1121,9 @@ function stopScanning() {
 </html>  
 """
 def detection_thread(camera_id, scrfd, arcface, db, skip_frames=1, threshold=0.4):  
-    global output_frame, raw_frame, lock, face_results, system_ready  
+    global output_frame, raw_frame, lock, face_results, system_ready
+    global challenge_active, challenge_detected_fingers, challenge_stable_count
+    global challenge_last_finger, challenge_status, challenge_answer  
   
     cap = cv2.VideoCapture(camera_id)  
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  
@@ -1100,36 +1252,38 @@ def detection_thread(camera_id, scrfd, arcface, db, skip_frames=1, threshold=0.4
                 for lx, ly in face["landmarks"]:  
                     cv2.circle(annotated, (int(lx), int(ly)), 2, (255, 0, 0), -1)  
   
-            with lock:  
-                output_frame = annotated.copy() 
-                # --- Finger counting during active challenge ---  
-                if challenge_active and finger_counter is not None:  
-                    finger_count, debug_info = finger_counter.count_fingers(frame)  
-                    challenge_detected_fingers = finger_count  
-                
-                    # Draw ROI on annotated frame  
-                    finger_counter.draw_roi(annotated, finger_count, active=True)  
-                
-                    # Stability check: need CHALLENGE_STABLE_THRESHOLD consecutive same readings  
-                    if finger_count >= 0:  
-                        if finger_count == challenge_last_finger:  
-                            challenge_stable_count += 1  
-                        else:  
-                            challenge_stable_count = 0  
-                            challenge_last_finger = finger_count  
-                
-                        if challenge_stable_count >= CHALLENGE_STABLE_THRESHOLD and challenge_status == "active":  
-                            if finger_count == challenge_answer:  
-                                challenge_status = "correct"  
-                                challenge_active = False  
-                            else:  
-                                challenge_status = "wrong"  
-                                challenge_active = False  
-                    else:  
-                        challenge_stable_count = 0  
-                elif finger_counter is not None:  
-                    # Draw inactive ROI hint  
-                    finger_counter.draw_roi(annotated, active=False) 
+            with lock:
+                # --- Finger counting during active challenge ---
+                if challenge_active and finger_counter is not None:
+                    finger_count, debug_info = finger_counter.count_fingers(frame)
+                    challenge_detected_fingers = finger_count
+
+                    # Draw ROI on annotated frame
+                    finger_counter.draw_roi(annotated, finger_count, active=True)
+
+                    # Stability check: need CHALLENGE_STABLE_THRESHOLD consecutive same readings
+                    if finger_count >= 0:
+                        if finger_count == challenge_last_finger:
+                            challenge_stable_count += 1
+                        else:
+                            challenge_stable_count = 0
+                            challenge_last_finger = finger_count
+
+                        if challenge_stable_count >= CHALLENGE_STABLE_THRESHOLD and challenge_status == "active":
+                            if finger_count == challenge_answer:
+                                challenge_status = "correct"
+                                challenge_active = False
+                            else:
+                                challenge_status = "wrong"
+                                challenge_active = False
+                    else:
+                        challenge_stable_count = 0
+                elif finger_counter is not None:
+                    # Draw inactive ROI hint
+                    finger_counter.draw_roi(annotated, active=False)
+
+                # MOVED: assign output_frame AFTER ROI is drawn
+                output_frame = annotated.copy()
                 face_results = last_faces.copy()  
   
     except Exception as e:  
@@ -1394,7 +1548,7 @@ def build_database_from_folder(
   
   
 def main():  
-    global scrfd_model, arcface_model, database  
+    global scrfd_model, arcface_model, database, finger_counter  
   
     parser = argparse.ArgumentParser(description="Web-Based Face Recognition System (SNPE/DSP)")  
     parser.add_argument("--camera", type=int, default=0, help="Camera ID")  
@@ -1517,154 +1671,5 @@ def main():
     return 0  
   
   
-if __name__ == "__main__":  
+if __name__ == "__main__":
     exit(main())
-
-
-class FingerCounter:  
-    """  
-    OpenCV-based finger counter using skin color segmentation,  
-    convex hull, and convexity defects. No ML model needed.  
-    """  
-  
-    def __init__(self, roi_x=0.55, roi_y=0.1, roi_w=0.4, roi_h=0.6):  
-        """  
-        ROI defines where the user should place their hand (fraction of frame).  
-        Default: right side of frame.  
-        """  
-        self.roi_x = roi_x  
-        self.roi_y = roi_y  
-        self.roi_w = roi_w  
-        self.roi_h = roi_h  
-  
-        # HSV skin color range (tune if needed for different skin tones)  
-        self.lower_skin = np.array([0, 30, 60], dtype=np.uint8)  
-        self.upper_skin = np.array([20, 150, 255], dtype=np.uint8)  
-  
-        # Secondary range for darker/lighter skin  
-        self.lower_skin2 = np.array([160, 30, 60], dtype=np.uint8)  
-        self.upper_skin2 = np.array([180, 150, 255], dtype=np.uint8)  
-  
-    def get_roi(self, frame):  
-        """Get the ROI rectangle coordinates for the given frame."""  
-        h, w = frame.shape[:2]  
-        x1 = int(w * self.roi_x)  
-        y1 = int(h * self.roi_y)  
-        x2 = int(w * (self.roi_x + self.roi_w))  
-        y2 = int(h * (self.roi_y + self.roi_h))  
-        return x1, y1, x2, y2  
-  
-    def count_fingers(self, frame):  
-        """  
-        Count the number of raised fingers in the ROI region.  
-        Returns (finger_count, debug_info_dict).  
-        finger_count: 0-5, or -1 if no hand detected.  
-        """  
-        h, w = frame.shape[:2]  
-        rx1, ry1, rx2, ry2 = self.get_roi(frame)  
-        roi = frame[ry1:ry2, rx1:rx2]  
-  
-        if roi.size == 0:  
-            return -1, {}  
-  
-        # Convert to HSV and create skin mask  
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)  
-        mask1 = cv2.inRange(hsv, self.lower_skin, self.upper_skin)  
-        mask2 = cv2.inRange(hsv, self.lower_skin2, self.upper_skin2)  
-        skin_mask = cv2.bitwise_or(mask1, mask2)  
-  
-        # Morphological operations to clean up  
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))  
-        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel, iterations=2)  
-        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel, iterations=1)  
-        skin_mask = cv2.GaussianBlur(skin_mask, (5, 5), 0)  
-  
-        # Find contours  
-        contours, _ = cv2.findContours(skin_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)  
-  
-        if not contours:  
-            return -1, {"mask": skin_mask}  
-  
-        # Get largest contour (assumed to be the hand)  
-        max_contour = max(contours, key=cv2.contourArea)  
-        area = cv2.contourArea(max_contour)  
-        roi_area = (rx2 - rx1) * (ry2 - ry1)  
-  
-        # Hand should be at least 5% of ROI area  
-        if area < roi_area * 0.05:  
-            return -1, {"mask": skin_mask, "area": area}  
-  
-        # Convex hull  
-        hull = cv2.convexHull(max_contour, returnPoints=False)  
-          
-        if len(hull) < 3:  
-            return 0, {"mask": skin_mask, "contour": max_contour}  
-  
-        # Convexity defects  
-        try:  
-            defects = cv2.convexityDefects(max_contour, hull)  
-        except cv2.error:  
-            return 0, {"mask": skin_mask, "contour": max_contour}  
-  
-        if defects is None:  
-            return 0, {"mask": skin_mask, "contour": max_contour}  
-  
-        # Count fingers using convexity defects  
-        # Each deep defect between fingers = one "valley"  
-        # Number of fingers = number of valleys + 1  
-        finger_count = 0  
-        for i in range(defects.shape[0]):  
-            s, e, f, d = defects[i, 0]  
-            start = tuple(max_contour[s][0])  
-            end = tuple(max_contour[e][0])  
-            far = tuple(max_contour[f][0])  
-  
-            # Calculate triangle sides  
-            a = np.sqrt((end[0] - start[0])**2 + (end[1] - start[1])**2)  
-            b = np.sqrt((far[0] - start[0])**2 + (far[1] - start[1])**2)  
-            c = np.sqrt((end[0] - far[0])**2 + (end[1] - far[1])**2)  
-  
-            # Angle at the defect point (cosine rule)  
-            if b * c == 0:  
-                continue  
-            angle = np.arccos((b**2 + c**2 - a**2) / (2 * b * c))  
-  
-            # Filter: angle < 90 degrees and defect depth > threshold  
-            depth = d / 256.0  # depth is in fixed-point  
-            if angle <= np.pi / 2 and depth > 30:  
-                finger_count += 1  
-  
-        # valleys + 1 = fingers (but cap at 5)  
-        finger_count = min(finger_count + 1, 5)  
-  
-        # If the contour area is very small relative to hull, might be a fist (0 fingers)  
-        hull_area = cv2.contourArea(cv2.convexHull(max_contour))  
-        solidity = area / hull_area if hull_area > 0 else 0  
-          
-        # A closed fist has high solidity (>0.85), open hand has lower solidity  
-        if solidity > 0.9 and finger_count <= 1:  
-            finger_count = 0  
-  
-        return finger_count, {  
-            "mask": skin_mask,  
-            "contour": max_contour,  
-            "defects": defects,  
-            "area": area,  
-            "solidity": solidity,  
-        }  
-  
-    def draw_roi(self, frame, finger_count=-1, active=False):  
-        """Draw the ROI rectangle and finger count on the frame."""  
-        rx1, ry1, rx2, ry2 = self.get_roi(frame)  
-        color = (0, 255, 255) if active else (128, 128, 128)  
-        thickness = 3 if active else 1  
-        cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), color, thickness)  
-  
-        if active and finger_count >= 0:  
-            label = f"Fingers: {finger_count}"  
-            cv2.putText(frame, label, (rx1 + 10, ry1 + 40),  
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)  
-        elif active:  
-            cv2.putText(frame, "Show hand here", (rx1 + 10, ry1 + 40),  
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)  
-        return frame
