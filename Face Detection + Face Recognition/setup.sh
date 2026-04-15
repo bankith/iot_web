@@ -11,7 +11,7 @@ export LD_LIBRARY_PATH=$SNPE_ROOT/lib/$SNPE_TARGET_ARCH:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH="/home/ubuntu/snpe_dsp_libs:$LD_LIBRARY_PATH"  
   
 # ── Hexagon DSP ──  
-export ADSP_LIBRARY_PATH="/home/ubuntu/2.27.0.240926/lib/hexagon-v68/unsigned;/usr/share/qcom/qcm6490/Thu>
+export ADSP_LIBRARY_PATH="/home/ubuntu/2.27.0.240926/lib/hexagon-v68/unsigned;/usr/share/qcom/qcm6490/Thundercomm/RB3gen2/dsp/cdsp;/usr/lib/rfsa/adsp/cdsp;/usr/lib/dsp/cdsp;."
   
 # ── Python paths ──  
 export PYTHONPATH="/home/ubuntu/finalProject2:$PYTHONPATH"  
