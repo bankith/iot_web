@@ -28,6 +28,17 @@ from pathlib import Path
 from PIL import Image  
 from flask import Flask, Response, render_template_string, request, jsonify  
 from snpehelper_manager import PerfProfile, Runtime, SnpeContext  
+
+
+import numpy as np  
+import cv2  
+  
+try:  
+    from ai_edge_litert.interpreter import Interpreter
+except ImportError:  
+    # Fallback for environments with full TensorFlow  
+    from tensorflow.lite.python.interpreter import Interpreter  
+  
   
 # =============================================================================  
 # SCRFD Face Detection Logic  
@@ -448,6 +459,214 @@ CHALLENGE_TIMEOUT = 15  # seconds
   
 finger_counter = None
 
+  
+class FingerCounterTFLite:  
+    """  
+    MediaPipe TFLite-based finger counter.  
+    Uses palm_detection_lite.tflite + hand_landmark_lite.tflite.  
+    Works on aarch64 Linux (Qualcomm QCS6490) via tflite-runtime.  
+    """  
+  
+    # Landmark indices  
+    WRIST = 0  
+    THUMB_CMC, THUMB_MCP, THUMB_IP, THUMB_TIP = 1, 2, 3, 4  
+    INDEX_MCP, INDEX_PIP, INDEX_DIP, INDEX_TIP = 5, 6, 7, 8  
+    MIDDLE_MCP, MIDDLE_PIP, MIDDLE_DIP, MIDDLE_TIP = 9, 10, 11, 12  
+    RING_MCP, RING_PIP, RING_DIP, RING_TIP = 13, 14, 15, 16  
+    PINKY_MCP, PINKY_PIP, PINKY_DIP, PINKY_TIP = 17, 18, 19, 20  
+  
+    # Connections for drawing  
+    HAND_CONNECTIONS = [  
+        (0,1),(1,2),(2,3),(3,4),    # thumb  
+        (0,5),(5,6),(6,7),(7,8),    # index  
+        (0,9),(9,10),(10,11),(11,12),  # middle  
+        (0,13),(13,14),(14,15),(15,16), # ring  
+        (0,17),(17,18),(18,19),(19,20), # pinky  
+        (5,9),(9,13),(13,17),       # palm  
+    ]  
+  
+    def __init__(self, palm_model_path="palm_detection_lite.tflite",  
+                 landmark_model_path="hand_landmark_lite.tflite"):  
+        # Load palm detector  
+        self.palm_interp = Interpreter(model_path=palm_model_path)  
+        self.palm_interp.allocate_tensors()  
+        self.palm_input = self.palm_interp.get_input_details()[0]  
+        self.palm_outputs = self.palm_interp.get_output_details()  
+        self.palm_size = self.palm_input['shape'][1]  # typically 192  
+  
+        # Load hand landmark model  
+        self.lm_interp = Interpreter(model_path=landmark_model_path)  
+        self.lm_interp.allocate_tensors()  
+        self.lm_input = self.lm_interp.get_input_details()[0]  
+        self.lm_outputs = self.lm_interp.get_output_details()  
+        self.lm_size = self.lm_input['shape'][1]  # typically 224  
+  
+        self._last_landmarks = None  # for drawing  
+        self._last_bbox = None  
+  
+    def _preprocess_palm(self, frame):  
+        """Resize and normalize frame for palm detector."""  
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  
+        img = cv2.resize(img, (self.palm_size, self.palm_size))  
+        img = img.astype(np.float32) / 255.0  
+        return np.expand_dims(img, axis=0)  
+  
+    def _detect_palm(self, frame):  
+        """  
+        Run palm detection. Returns best palm bbox as (x1,y1,x2,y2)  
+        in pixel coordinates, or None if no hand found.  
+        """  
+        h, w = frame.shape[:2]  
+        input_data = self._preprocess_palm(frame)  
+        self.palm_interp.set_tensor(self.palm_input['index'], input_data)  
+        self.palm_interp.invoke()  
+  
+        # Output format depends on the specific model version  
+        # Typically: boxes [1, N, 4] and scores [1, N, 1]  
+        # You may need to adjust indices based on your model  
+        boxes = self.palm_interp.get_tensor(self.palm_outputs[0]['index'])  
+        scores = self.palm_interp.get_tensor(self.palm_outputs[1]['index'])  
+  
+        scores = scores.flatten()  
+        best_idx = np.argmax(scores)  
+  
+        if scores[best_idx] < 0.5:  
+            return None  
+  
+        # Decode box (model outputs normalized coords)  
+        box = boxes[0, best_idx]  # [cx, cy, w, h] or [x1, y1, x2, y2]  
+        # Adjust based on your model's output format:  
+        cx, cy, bw, bh = box[0], box[1], box[2], box[3]  
+        x1 = int((cx - bw/2) * w)  
+        y1 = int((cy - bh/2) * h)  
+        x2 = int((cx + bw/2) * w)  
+        y2 = int((cy + bh/2) * h)  
+  
+        # Add padding (25%)  
+        pad_w = int((x2 - x1) * 0.25)  
+        pad_h = int((y2 - y1) * 0.25)  
+        x1 = max(0, x1 - pad_w)  
+        y1 = max(0, y1 - pad_h)  
+        x2 = min(w, x2 + pad_w)  
+        y2 = min(h, y2 + pad_h)  
+  
+        return (x1, y1, x2, y2)  
+  
+    def _get_landmarks(self, frame, bbox):  
+        """  
+        Run hand landmark model on cropped hand region.  
+        Returns 21 landmarks as [(x, y, z), ...] in pixel coords.  
+        """  
+        x1, y1, x2, y2 = bbox  
+        h, w = frame.shape[:2]  
+        crop = frame[y1:y2, x1:x2]  
+        if crop.size == 0:  
+            return None  
+  
+        img = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)  
+        img = cv2.resize(img, (self.lm_size, self.lm_size))  
+        img = img.astype(np.float32) / 255.0  
+        input_data = np.expand_dims(img, axis=0)  
+  
+        self.lm_interp.set_tensor(self.lm_input['index'], input_data)  
+        self.lm_interp.invoke()  
+  
+        # Landmarks output: [1, 21, 3] (x, y, z normalized)  
+        landmarks_raw = self.lm_interp.get_tensor(self.lm_outputs[0]['index'])  
+        landmarks_raw = landmarks_raw.reshape(21, 3)  
+  
+        # Convert from crop-relative normalized to frame pixel coords  
+        crop_w, crop_h = x2 - x1, y2 - y1  
+        landmarks = []  
+        for lx, ly, lz in landmarks_raw:  
+            px = int(lx * crop_w) + x1  
+            py = int(ly * crop_h) + y1  
+            landmarks.append((px, py, lz))  
+  
+        return landmarks  
+  
+    def _count_from_landmarks(self, landmarks):  
+        """Count raised fingers from 21 hand landmarks."""  
+        if landmarks is None or len(landmarks) < 21:  
+            return -1  
+  
+        finger_count = 0  
+  
+        # Thumb: compare tip.x vs IP.x  
+        # Determine hand orientation using wrist and middle MCP  
+        wrist_x = landmarks[self.WRIST][0]  
+        middle_mcp_x = landmarks[self.MIDDLE_MCP][0]  
+        is_right_hand = wrist_x < middle_mcp_x  
+  
+        if is_right_hand:  
+            # Right hand: thumb tip should be LEFT of IP joint when raised  
+            if landmarks[self.THUMB_TIP][0] < landmarks[self.THUMB_IP][0]:  
+                finger_count += 1  
+        else:  
+            # Left hand: thumb tip should be RIGHT of IP joint when raised  
+            if landmarks[self.THUMB_TIP][0] > landmarks[self.THUMB_IP][0]:  
+                finger_count += 1  
+  
+        # Index, Middle, Ring, Pinky: tip.y < PIP.y means raised  
+        # (y decreases upward in image coordinates)  
+        finger_tips = [self.INDEX_TIP, self.MIDDLE_TIP, self.RING_TIP, self.PINKY_TIP]  
+        finger_pips = [self.INDEX_PIP, self.MIDDLE_PIP, self.RING_PIP, self.PINKY_PIP]  
+  
+        for tip_idx, pip_idx in zip(finger_tips, finger_pips):  
+            if landmarks[tip_idx][1] < landmarks[pip_idx][1]:  
+                finger_count += 1  
+  
+        return finger_count  
+  
+    def count_fingers(self, frame):  
+        """  
+        Count fingers in frame. Same interface as OpenCV FingerCounter.  
+        Returns (finger_count, debug_info).  
+        """  
+        self._last_landmarks = None  
+        self._last_bbox = None  
+  
+        bbox = self._detect_palm(frame)  
+        if bbox is None:  
+            return -1, {}  
+  
+        self._last_bbox = bbox  
+        landmarks = self._get_landmarks(frame, bbox)  
+        if landmarks is None:  
+            return -1, {"bbox": bbox}  
+  
+        self._last_landmarks = landmarks  
+        count = self._count_from_landmarks(landmarks)  
+  
+        return count, {"bbox": bbox, "landmarks": landmarks}  
+  
+    def draw_roi(self, frame, finger_count=-1, active=False):  
+        """  
+        Draw hand landmarks on frame. Same interface as OpenCV FingerCounter.  
+        """  
+        if active and self._last_landmarks:  
+            # Draw connections  
+            for i, j in self.HAND_CONNECTIONS:  
+                pt1 = self._last_landmarks[i][:2]  
+                pt2 = self._last_landmarks[j][:2]  
+                cv2.line(frame, pt1, pt2, (0, 255, 0), 2)  
+  
+            # Draw landmark points  
+            for lm in self._last_landmarks:  
+                cv2.circle(frame, (lm[0], lm[1]), 4, (0, 0, 255), -1)  
+  
+            # Draw finger count  
+            if finger_count >= 0:  
+                cv2.putText(frame, f"Fingers: {finger_count}", (20, 50),  
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)  
+        elif active and self._last_bbox:  
+            x1, y1, x2, y2 = self._last_bbox  
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)  
+        elif active:  
+            cv2.putText(frame, "Show hand", (20, 50),  
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)  
+  
+        return frame
 
 class FingerCounter:
     """

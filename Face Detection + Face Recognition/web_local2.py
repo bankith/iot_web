@@ -1,0 +1,1350 @@
+# Face Detection + Face Recognition/web_local2.py  
+"""  
+web_local2.py — Face Detection + Recognition + Hand Detection (Mac / Local)  
+  
+Uses ONNX Runtime for face detection/recognition (BlazeFace + CavaFace)  
+Uses MediaPipe Hands for finger counting (replaces OpenCV skin segmentation)  
+  
+Models:  
+    FaceDetector.onnx   — BlazeFace face detection  
+    cavaface.onnx       — CavaFace face recognition (512-dim embedding)  
+    MediaPipe Hands     — built-in (no separate model file needed)  
+  
+Usage:  
+    pip install flask onnxruntime opencv-python numpy mediapipe  
+  
+    python web_local2.py --datasets ../datasets \  
+        --detector ../models/cavaface-onnx-float/FaceDetector.onnx \  
+        --cavaface ../models/cavaface-onnx-float/cavaface.onnx  
+  
+    Then open: http://localhost:5001  
+"""  
+  
+import argparse  
+import os  
+import random  
+import threading  
+import time  
+from pathlib import Path  
+  
+import cv2  
+import numpy as np  
+import onnxruntime as ort  
+import mediapipe as mp  
+from flask import Flask, Response, jsonify, render_template_string, request  
+  
+# =============================================================================  
+# Constants  
+# =============================================================================  
+  
+DETECT_INPUT_HW   = (256, 256)  
+CAVAFACE_INPUT_HW = (112, 112)  
+SCORE_THRESHOLD   = 0.75  
+NMS_IOU_THRESHOLD = 0.3  
+IMG_EXTENSIONS    = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}  
+  
+ARCFACE_DST = np.array([  
+    [38.2946, 51.6963],  
+    [73.5318, 51.5014],  
+    [56.0252, 71.7366],  
+    [41.5493, 92.3655],  
+    [70.7299, 92.2041],  
+], dtype=np.float32)  
+  
+  
+# =============================================================================  
+# Anchor / Decode helpers  
+# =============================================================================  
+  
+def generate_anchors(input_size: int = 256) -> np.ndarray:  
+    strides, anchors_per_cell = [16, 32], [2, 6]  
+    rows = []  
+    for stride, n in zip(strides, anchors_per_cell):  
+        grid = input_size // stride  
+        for y in range(grid):  
+            for x in range(grid):  
+                cx, cy = (x + 0.5) / grid, (y + 0.5) / grid  
+                for _ in range(n):  
+                    rows.append([cx, cy, 1.0, 1.0])  
+    return np.array(rows, dtype=np.float32).reshape(-1, 2, 2)  
+  
+  
+def resize_pad(img_rgb: np.ndarray, target_hw: tuple):  
+    h, w = img_rgb.shape[:2]  
+    th, tw = target_hw  
+    scale = min(th / h, tw / w)  
+    nh, nw = int(h * scale), int(w * scale)  
+    resized = cv2.resize(img_rgb, (nw, nh))  
+    pt, pl = (th - nh) // 2, (tw - nw) // 2  
+    padded = np.zeros((th, tw, 3), dtype=np.uint8)  
+    padded[pt:pt + nh, pl:pl + nw] = resized  
+    tensor = (padded.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]  
+    return tensor, scale, pt, pl  
+  
+  
+def decode_boxes(raw: np.ndarray, anchors: np.ndarray, img_hw: tuple) -> np.ndarray:  
+    H, W = img_hw  
+    center = anchors[:, 0:1, :] * np.array([[W, H]], dtype=np.float32)  
+    scale  = anchors[:, 1:2, :]  
+    K = raw.shape[1]  
+    mask = np.ones((K, 1), dtype=np.float32)  
+    mask[1] = 0.0  
+    return raw * scale + center * mask  
+  
+  
+def box_iou(a: np.ndarray, b: np.ndarray) -> float:  
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])  
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])  
+    inter  = max(0.0, x2 - x1) * max(0.0, y2 - y1)  
+    union  = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter  
+    return inter / union if union > 0 else 0.0  
+  
+  
+def nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> list:  
+    order = scores.argsort()[::-1].tolist()  
+    keep  = []  
+    while order:  
+        i = order.pop(0)  
+        keep.append(i)  
+        order = [j for j in order if box_iou(boxes[i], boxes[j]) < iou_thr]  
+    return keep  
+  
+  
+# =============================================================================  
+# Face Detection (BlazeFace ONNX)  
+# =============================================================================  
+  
+def detect_faces(img_rgb: np.ndarray,  
+                 det_sess: ort.InferenceSession,  
+                 anchors: np.ndarray,  
+                 score_threshold: float = SCORE_THRESHOLD) -> list:  
+    inp, scale, pt, pl = resize_pad(img_rgb, DETECT_INPUT_HW)  
+    name = det_sess.get_inputs()[0].name  
+    c1, c2, s1, s2 = det_sess.run(None, {name: inp})  
+  
+    coords = np.concatenate([c1[0], c2[0]], axis=0).reshape(-1, 8, 2)  
+    scores = np.concatenate([s1[0], s2[0]], axis=0).reshape(-1)  
+    scores = 1.0 / (1.0 + np.exp(-np.clip(scores, -100.0, 100.0)))  
+  
+    decoded = decode_boxes(coords, anchors, DETECT_INPUT_HW)  
+  
+    cx, cy = decoded[:, 0, 0], decoded[:, 0, 1]  
+    bw, bh = decoded[:, 1, 0], decoded[:, 1, 1]  
+    boxes  = np.stack([cx - bw/2, cy - bh/2, cx + bw/2, cy + bh/2], axis=1)  
+  
+    mask = scores >= score_threshold  
+    if not mask.any():  
+        return []  
+  
+    boxes_f  = boxes[mask]  
+    scores_f = scores[mask]  
+    decoded_f = decoded[mask]  
+  
+    keep = nms(boxes_f, scores_f, NMS_IOU_THRESHOLD)  
+  
+    results = []  
+    for idx in keep:  
+        b   = boxes_f[idx]  
+        kps = decoded_f[idx, 2:7, :].copy()  
+  
+        box_orig = np.array([  
+            (b[0] - pl) / scale,  
+            (b[1] - pt) / scale,  
+            (b[2] - pl) / scale,  
+            (b[3] - pt) / scale,  
+        ])  
+        kps[:, 0] = (kps[:, 0] - pl) / scale  
+        kps[:, 1] = (kps[:, 1] - pt) / scale  
+  
+        M, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST, method=cv2.LMEDS)  
+        aligned = None  
+        if M is not None:  
+            aligned = cv2.warpAffine(  
+                img_rgb, M, (CAVAFACE_INPUT_HW[1], CAVAFACE_INPUT_HW[0])  
+            )  
+  
+        results.append({  
+            "bbox":    box_orig.tolist(),  
+            "score":   float(scores_f[idx]),  
+            "aligned": aligned,  
+        })  
+  
+    return results  
+  
+  
+# =============================================================================  
+# Face Recognition (CavaFace ONNX)  
+# =============================================================================  
+  
+def get_embedding(face_rgb: np.ndarray, cava_sess: ort.InferenceSession) -> np.ndarray:  
+    inp  = (face_rgb.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]  
+    name = cava_sess.get_inputs()[0].name  
+    emb  = cava_sess.run(None, {name: inp})[0].reshape(-1)  
+    norm = np.linalg.norm(emb)  
+    return emb / (norm + 1e-8)  
+  
+  
+# =============================================================================  
+# Face Database  
+# =============================================================================  
+  
+class FaceDB:  
+    def __init__(self, db_path: str = "face_db_local.npz"):  
+        self.db_path = db_path  
+        self.embeddings: dict[str, np.ndarray] = {}  
+        self._load()  
+  
+    def _load(self) -> None:  
+        if Path(self.db_path).exists():  
+            data = np.load(self.db_path)  
+            self.embeddings = {name: data[name] for name in data.files}  
+            print(f"  ✓ Loaded existing database: {list(self.embeddings.keys())}")  
+  
+    def save(self) -> None:  
+        np.savez(self.db_path, **self.embeddings)  
+  
+    def add(self, name: str, embedding: np.ndarray) -> None:  
+        self.embeddings[name] = embedding  
+        self.save()  
+  
+    def search(self, query: np.ndarray, threshold: float = 0.45) -> tuple:  
+        best_name, best_score = None, -1.0  
+        for name, emb in self.embeddings.items():  
+            score = float(np.dot(query, emb))  
+            if score > best_score:  
+                best_score, best_name = score, name  
+        if best_score < threshold:  
+            return None, best_score  
+        return best_name, best_score  
+  
+    def __len__(self) -> int:  
+        return len(self.embeddings)  
+  
+  
+# =============================================================================  
+# Finger Counter (MediaPipe Hands — replaces OpenCV skin segmentation)  
+# =============================================================================  
+  
+class FingerCounter:  
+    """  
+    MediaPipe-based finger counter. Uses a trained hand landmark model  
+    instead of skin color segmentation. Much more accurate and robust.  
+    """  
+  
+    def __init__(self):  
+        self.mp_hands = mp.solutions.hands  
+        self.hands = self.mp_hands.Hands(  
+            static_image_mode=False,  
+            max_num_hands=1,  
+            min_detection_confidence=0.5,  
+            min_tracking_confidence=0.5,  
+        )  
+        self.mp_draw = mp.solutions.drawing_utils  
+        self.mp_styles = mp.solutions.drawing_styles  
+        self._last_hand_landmarks = None  
+  
+    def count_fingers(self, frame):  
+        """  
+        Count raised fingers in the frame.  
+        Returns (finger_count, debug_info_dict).  
+        finger_count: 0-5, or -1 if no hand detected.  
+        """  
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  
+        results = self.hands.process(rgb)  
+  
+        if not results.multi_hand_landmarks:  
+            self._last_hand_landmarks = None  
+            return -1, {}  
+  
+        hand_lms = results.multi_hand_landmarks[0]  
+        self._last_hand_landmarks = hand_lms  
+  
+        # Determine handedness (mirrored in webcam)  
+        handedness = "Right"  
+        if results.multi_handedness:  
+            handedness = results.multi_handedness[0].classification[0].label  
+  
+        lm = hand_lms.landmark  
+        fingers = []  
+  
+        # Thumb: tip(4) vs IP(3) — compare x-coordinates  
+        # Note: webcam is mirrored, so MediaPipe's "Right" appears on left side  
+        if handedness == "Right":  
+            fingers.append(1 if lm[4].x < lm[3].x else 0)  
+        else:  
+            fingers.append(1 if lm[4].x > lm[3].x else 0)  
+  
+        # Index(8 vs 6), Middle(12 vs 10), Ring(16 vs 14), Pinky(20 vs 18)  
+        # Tip above PIP joint means finger is raised (y decreases upward)  
+        for tip_id, pip_id in [(8, 6), (12, 10), (16, 14), (20, 18)]:  
+            fingers.append(1 if lm[tip_id].y < lm[pip_id].y else 0)  
+  
+        count = sum(fingers)  
+        return count, {  
+            "landmarks": hand_lms,  
+            "handedness": handedness,  
+            "fingers": fingers,  
+        }  
+  
+    def draw_roi(self, frame, finger_count=-1, active=False):  
+        """Draw hand landmarks and finger count on the frame."""  
+        if self._last_hand_landmarks is not None and active:  
+            self.mp_draw.draw_landmarks(  
+                frame,  
+                self._last_hand_landmarks,  
+                self.mp_hands.HAND_CONNECTIONS,  
+                self.mp_styles.get_default_hand_landmarks_style(),  
+                self.mp_styles.get_default_hand_connections_style(),  
+            )  
+        if active and finger_count >= 0:  
+            cv2.putText(frame, f"Fingers: {finger_count}", (20, 50),  
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)  
+        elif active:  
+            cv2.putText(frame, "Show hand", (20, 50),  
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (128, 128, 128), 2)  
+        return frame  
+  
+  
+# =============================================================================  
+# Pre-enrollment from datasets folder  
+# =============================================================================  
+  
+def build_database_from_folder(datasets_dir: str,  
+                                det_sess: ort.InferenceSession,  
+                                anchors: np.ndarray,  
+                                cava_sess: ort.InferenceSession,  
+                                db: FaceDB) -> None:  
+    datasets_path = Path(datasets_dir)  
+    if not datasets_path.exists():  
+        print(f"  ⚠ Datasets folder not found: {datasets_dir}")  
+        return  
+    person_dirs = sorted([d for d in datasets_path.iterdir() if d.is_dir()])  
+    if not person_dirs:  
+        print(f"  ⚠ No sub-folders found in {datasets_dir}")  
+        return  
+    print(f"\nBuilding database from: {datasets_dir}")  
+    print("-" * 40)  
+    enrolled = 0  
+    for person_dir in person_dirs:  
+        name  = person_dir.name  
+        files = [f for f in sorted(person_dir.iterdir())  
+                 if f.suffix.lower() in IMG_EXTENSIONS]  
+        if not files:  
+            print(f"  [{name}] no images — skipped")  
+            continue  
+        embeddings = []  
+        for img_path in files:  
+            img_bgr = cv2.imread(str(img_path))  
+            if img_bgr is None:  
+                continue  
+            img_rgb   = img_bgr[:, :, ::-1]  
+            detections = detect_faces(img_rgb, det_sess, anchors)  
+            if not detections:  
+                print(f"  [{name}] no face in {img_path.name} — skipped")  
+                continue  
+            best  = max(detections, key=lambda d: d["score"])  
+            aligned = best["aligned"]  
+            if aligned is None:  
+                continue  
+            emb = get_embedding(aligned, cava_sess)  
+            embeddings.append(emb)  
+            print(f"  [{name}] {img_path.name} ✓")  
+        if embeddings:  
+            avg = np.mean(embeddings, axis=0)  
+            avg /= np.linalg.norm(avg) + 1e-8  
+            db.add(name, avg)  
+            print(f"  → Enrolled: {name} ({len(embeddings)} photo(s))\n")  
+            enrolled += 1  
+        else:  
+            print(f"  [{name}] no valid faces — not enrolled\n")  
+    print(f"Pre-enrollment done: {enrolled} person(s) added")  
+    print(f"Total in database  : {len(db)} person(s)")  
+    print("-" * 40)
+    # =============================================================================  
+# HTML Template  
+# =============================================================================  
+  
+HTML_TEMPLATE = """  
+<!DOCTYPE html>  
+<html lang="en">  
+<head>  
+<meta charset="UTF-8">  
+<title>Face Recognition (Local v2)</title>  
+<meta name="viewport" content="width=device-width, initial-scale=1.0">  
+<style>  
+:root {  
+    --bg-1: #0f172a;  
+    --bg-2: #1e293b;  
+    --glass: rgba(255,255,255,0.08);  
+    --border: rgba(255,255,255,0.15);  
+    --primary: #6366f1;  
+    --success: #22c55e;  
+    --danger: #ef4444;  
+    --text-main: #f8fafc;  
+    --text-sub: #cbd5e1;  
+}  
+* { margin: 0; padding: 0; box-sizing: border-box; }  
+body {  
+    font-family: Inter, system-ui, sans-serif;  
+    background:  
+        radial-gradient(1200px 600px at 10% 10%, #1e1b4b, transparent),  
+        linear-gradient(135deg, var(--bg-1), var(--bg-2));  
+    color: var(--text-main);  
+    min-height: 100vh;  
+}  
+.container { max-width: 1440px; margin: auto; padding: 32px; }  
+h1 { text-align: center; font-size: 2.4rem; font-weight: 700; }  
+.subtitle { text-align: center; color: var(--text-sub); margin: 8px 0 32px; }  
+.main-content {  
+    display: grid;  
+    grid-template-columns: 3fr 1.2fr;  
+    gap: 24px;  
+}  
+@media (max-width: 1024px) { .main-content { grid-template-columns: 1fr; } }  
+  
+/* Challenge overlay */  
+.challenge-overlay {  
+    position: fixed;  
+    top: 0; left: 0; right: 0; bottom: 0;  
+    background: rgba(15,23,42,0.85);  
+    display: flex;  
+    align-items: center;  
+    justify-content: center;  
+    z-index: 100;  
+}  
+.challenge-card {  
+    background: var(--bg-2);  
+    border: 2px solid var(--primary);  
+    border-radius: 16px;  
+    padding: 40px;  
+    text-align: center;  
+    max-width: 500px;  
+    width: 90%;  
+}  
+.challenge-question {  
+    font-size: 3rem;  
+    font-weight: 700;  
+    margin: 20px 0;  
+    color: #fff;  
+}  
+.challenge-fingers {  
+    font-size: 2rem;  
+    margin: 16px 0;  
+    color: var(--text-sub);  
+}  
+.challenge-timer {  
+    font-size: 1.2rem;  
+    color: var(--text-sub);  
+    margin-top: 12px;  
+}  
+.challenge-result {  
+    font-size: 1.5rem;  
+    font-weight: 600;  
+    margin-top: 16px;  
+    padding: 12px 24px;  
+    border-radius: 8px;  
+}  
+.challenge-result.correct {  
+    background: rgba(34,197,94,0.2);  
+    color: #22c55e;  
+    border: 1px solid #22c55e;  
+}  
+.challenge-result.wrong {  
+    background: rgba(239,68,68,0.2);  
+    color: #ef4444;  
+    border: 1px solid #ef4444;  
+}  
+.challenge-result.timeout {  
+    background: rgba(234,179,8,0.2);  
+    color: #eab308;  
+    border: 1px solid #eab308;  
+}  
+.video-panel.edge-gold {  
+    box-shadow: 0 0 30px 8px rgba(234,179,8,.6),  
+                inset 0 0 30px 4px rgba(234,179,8,.15);  
+    border-color: rgba(234,179,8,.5);  
+}  
+.btn-verify {  
+    background: #eab308;  
+    color: #000;  
+    border: none;  
+    padding: 4px 12px;  
+    font-size: .8rem;  
+    font-weight: 600;  
+    border-radius: 6px;  
+    cursor: pointer;  
+    margin-left: 8px;  
+}  
+.btn-verify:hover { background: #ca8a04; }  
+.hand-hint {  
+    font-size: .85rem;  
+    color: var(--text-sub);  
+    margin-top: 8px;  
+}  
+  
+.video-panel {  
+    background: var(--glass);  
+    padding: 16px;  
+    border: 1px solid var(--border);  
+    backdrop-filter: blur(16px);  
+    box-shadow: 0 20px 60px rgba(0,0,0,.35);  
+    position: relative;  
+    transition: box-shadow .4s ease, border-color .4s ease;  
+}  
+.video-panel.edge-green {  
+    box-shadow: 0 0 30px 8px rgba(34,197,94,.6), inset 0 0 30px 4px rgba(34,197,94,.15);  
+    border-color: rgba(34,197,94,.5);  
+}  
+.video-panel.edge-red {  
+    box-shadow: 0 0 30px 8px rgba(239,68,68,.6), inset 0 0 30px 4px rgba(239,68,68,.15);  
+    border-color: rgba(239,68,68,.5);  
+}  
+.video-panel.edge-blue {  
+    box-shadow: 0 0 30px 8px rgba(99,102,241,.6), inset 0 0 30px 4px rgba(99,102,241,.15);  
+    border-color: rgba(99,102,241,.5);  
+}  
+.video-panel img {  
+    width: 100%;  
+    border-radius: 12px;  
+    min-height: 300px;  
+    background: #0d0d1a;  
+    object-fit: contain;  
+}  
+#videoStream { width: 100%; background: #000; display: block; }  
+.scan-overlay {  
+    position: absolute;  
+    top: 16px; left: 16px; right: 16px; bottom: 16px;  
+    background: rgba(0,0,0,.55);  
+    display: flex;  
+    align-items: center;  
+    justify-content: center;  
+    z-index: 10;  
+}  
+.btn-scan {  
+    background: var(--primary);  
+    color: #fff;  
+    border: none;  
+    padding: 14px 36px;  
+    font-size: 1.1rem;  
+    font-weight: 600;  
+    border-radius: 8px;  
+    cursor: pointer;  
+    transition: background .2s;  
+}  
+.btn-scan:hover { background: #4f46e5; }  
+.btn-stop {  
+    background: var(--danger);  
+    padding: 10px 28px;  
+    font-size: .95rem;  
+}  
+.btn-stop:hover { background: #dc2626; }  
+.faces-panel {  
+    background: var(--glass);  
+    padding: 20px;  
+    border: 1px solid var(--border);  
+    backdrop-filter: blur(16px);  
+    max-height: 640px;  
+    overflow-y: auto;  
+}  
+.faces-panel h2 { margin-bottom: 16px; }  
+.face-card {  
+    background: linear-gradient(180deg, rgba(255,255,255,.12), rgba(255,255,255,.05));  
+    padding: 16px;  
+    margin-bottom: 14px;  
+    border: 1px solid var(--border);  
+    transition: .25s;  
+}  
+.face-card:hover { transform: translateY(-4px); box-shadow: 0 10px 30px rgba(0,0,0,.35); }  
+.face-card.identified { border-left: 4px solid var(--success); }  
+.face-card.unknown    { border-left: 4px solid var(--danger); }  
+.face-header {  
+    display: flex;  
+    justify-content: space-between;  
+    align-items: center;  
+    margin-bottom: 8px;  
+}  
+.face-name { font-weight: 600; }  
+.face-similarity { font-size: .85rem; color: var(--text-sub); }  
+.stats {  
+    display: grid;  
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));  
+    gap: 20px;  
+    margin-top: 28px;  
+}  
+.stat-box {  
+    background: var(--glass);  
+    padding: 22px;  
+    border: 1px solid var(--border);  
+    backdrop-filter: blur(16px);  
+    text-align: center;  
+}  
+.stat-value { font-size: 2rem; font-weight: 700; margin-top: 8px; }  
+.stat-label { font-size: .75rem; letter-spacing: .15em; text-transform: uppercase; color: var(--text-sub); }  
+.badge-local {  
+    display: inline-block;  
+    background: rgba(99,102,241,.25);  
+    border: 1px solid var(--primary);  
+    color: #a5b4fc;  
+    font-size: .7rem;  
+    padding: 2px 8px;  
+    border-radius: 999px;  
+    margin-left: 10px;  
+    vertical-align: middle;  
+    letter-spacing: .05em;  
+}  
+</style>  
+</head>  
+<body>  
+<div class="container">  
+    <h1>Face Recognition <span class="badge-local">LOCAL / TFLite</span></h1>  
+    <p class="subtitle">BlazeFace + CavaFace (ONNX) &bull; MediaPipe Hand Landmark (TFLite via ai-edge-litert)</p>  
+  
+    <div class="main-content">  
+        <div class="video-panel" id="videoPanel">  
+            <img id="videoStream" src="">  
+            <div class="scan-overlay" id="scanOverlay">  
+                <button class="btn-scan" onclick="startScanning()">&#9654; Start Scanning</button>  
+            </div>  
+            <div style="text-align:center; margin-top:12px;">  
+                <button class="btn-scan btn-stop" id="btnStop" onclick="stopScanning()" style="display:none;">&#9632; Stop Scanning</button>  
+            </div>  
+        </div>  
+        <div class="faces-panel">  
+            <h2>Detected Faces</h2>  
+            <div id="facesList"></div>  
+        </div>  
+    </div>  
+  
+    <div class="stats">  
+        <div class="stat-box">  
+            <div class="stat-label">People in Database</div>  
+            <div class="stat-value" id="dbCount">--</div>  
+        </div>  
+        <div class="stat-box">  
+            <div class="stat-label">Faces Detected</div>  
+            <div class="stat-value" id="facesCount">--</div>  
+        </div>  
+        <div class="stat-box">  
+            <div class="stat-label">Fingers Detected</div>  
+            <div class="stat-value" id="fingerCount">--</div>  
+        </div>  
+    </div>  
+  
+    <div style="text-align:center; margin-top:20px;">  
+        <a href="/test_finger" style="color:#6366f1; text-decoration:none; font-size:.9rem;">Open Finger Detection Test Page &rarr;</a>  
+    </div>  
+  
+    <!-- Challenge Overlay -->  
+    <div class="challenge-overlay" id="challengeOverlay" style="display:none;">  
+        <div class="challenge-card">  
+            <h2>Hand Verification</h2>  
+            <p style="color:var(--text-sub)">Verifying: <strong id="challengePerson"></strong></p>  
+            <div class="challenge-question" id="challengeQuestion"></div>  
+            <div class="challenge-fingers">  
+                Detected fingers: <span id="challengeFingers">--</span>  
+            </div>  
+            <div class="challenge-timer" id="challengeTimer"></div>  
+            <div id="challengeResult"></div>  
+            <button class="btn-scan" onclick="resetChallenge()" style="margin-top:20px;" id="challengeCloseBtn">Close</button>  
+        </div>  
+    </div>  
+</div>  
+  
+<script>  
+const facesList  = document.getElementById('facesList');  
+const facesCount = document.getElementById('facesCount');  
+const dbCount    = document.getElementById('dbCount');  
+let pollTimer = null;  
+  
+function updateFaces() {  
+    fetch('/get_faces')  
+        .then(r => r.json())  
+        .then(data => {  
+            facesCount.textContent = data.faces.length;  
+            dbCount.textContent    = data.db_size;  
+            document.getElementById('fingerCount').textContent =  
+                data.finger_count >= 0 ? data.finger_count : '--';  
+  
+            facesList.innerHTML = data.faces.length === 0  
+                ? '<div style="opacity:.6;text-align:center">No faces detected</div>'  
+                : data.faces.map(face => `  
+                    <div class="face-card ${face.identified ? 'identified' : 'unknown'}">  
+                        <div class="face-header">  
+                            <div class="face-name">  
+                                ${face.identified ? '&#10003; ' + face.name : '&#10067; Unknown'}  
+                            </div>  
+                            ${face.identified  
+                                ? '<div class="face-similarity">' + (face.similarity * 100).toFixed(1) + '%</div>'  
+                                : '<div class="face-similarity" style="color:var(--danger)">Not in DB</div>'  
+                            }  
+                            ${face.identified  
+                                ? `<button class="btn-verify" onclick="startChallenge('${face.name}')">Verify</button>`
+                                : ''  
+                            }  
+                        </div>  
+                        <div style="font-size:.85rem;opacity:.7">  
+                            Score: ${face.detection_score.toFixed(3)}  
+                        </div>  
+                    </div>  
+                `).join('');  
+  
+            // Edge Light  
+            const panel = document.getElementById('videoPanel');  
+            panel.classList.remove('edge-green', 'edge-red', 'edge-blue');  
+            if (data.faces.length > 0) {  
+                const hasIdentified = data.faces.some(f => f.identified);  
+                const hasUnknown    = data.faces.some(f => !f.identified);  
+                if (hasIdentified && !hasUnknown)      panel.classList.add('edge-green');  
+                else if (!hasIdentified && hasUnknown)  panel.classList.add('edge-red');  
+                else                                    panel.classList.add('edge-blue');  
+            }  
+        });  
+}  
+  
+let challengeTimer = null;  
+  
+function startChallenge(person) {  
+    fetch('/start_challenge', {  
+        method: 'POST',  
+        headers: {'Content-Type': 'application/json'},  
+        body: JSON.stringify({person: person})  
+    })  
+    .then(r => r.json())  
+    .then(data => {  
+        document.getElementById('challengeOverlay').style.display = 'flex';  
+        document.getElementById('challengePerson').textContent = data.person;  
+        document.getElementById('challengeQuestion').textContent = data.question;  
+        document.getElementById('challengeFingers').textContent = '--';  
+        document.getElementById('challengeResult').innerHTML = '';  
+        document.getElementById('challengeResult').className = 'challenge-result';  
+  
+        if (challengeTimer) clearInterval(challengeTimer);  
+        challengeTimer = setInterval(pollChallenge, 500);  
+    });  
+}  
+  
+function pollChallenge() {  
+    fetch('/get_challenge')  
+    .then(r => r.json())  
+    .then(data => {  
+        document.getElementById('challengeFingers').textContent =  
+            data.detected_fingers >= 0 ? data.detected_fingers : '--';  
+        document.getElementById('challengeTimer').textContent =  
+            data.status === 'active' ? `Time remaining: ${data.remaining}s` : '';  
+  
+        if (data.status === 'correct') {  
+            clearInterval(challengeTimer);  
+            document.getElementById('challengeResult').innerHTML = 'VERIFIED — Correct!';  
+            document.getElementById('challengeResult').className = 'challenge-result correct';  
+            document.getElementById('videoPanel').classList.remove('edge-green','edge-red','edge-blue');  
+            document.getElementById('videoPanel').classList.add('edge-gold');  
+        } else if (data.status === 'wrong') {  
+            clearInterval(challengeTimer);  
+            document.getElementById('challengeResult').innerHTML =  
+                `WRONG — You showed ${data.detected_fingers}, expected ${data.expected_answer}`;  
+            document.getElementById('challengeResult').className = 'challenge-result wrong';  
+        } else if (data.status === 'timeout') {  
+            clearInterval(challengeTimer);  
+            document.getElementById('challengeResult').innerHTML = 'TIMEOUT — Too slow!';  
+            document.getElementById('challengeResult').className = 'challenge-result timeout';  
+        }  
+    });  
+}  
+  
+function resetChallenge() {  
+    if (challengeTimer) clearInterval(challengeTimer);  
+    fetch('/reset_challenge', {method: 'POST'});  
+    document.getElementById('challengeOverlay').style.display = 'none';  
+    document.getElementById('videoPanel').classList.remove('edge-gold');  
+}  
+  
+function startScanning() {  
+    document.getElementById('videoStream').src = '/video_feed';  
+    document.getElementById('scanOverlay').style.display = 'none';  
+    document.getElementById('btnStop').style.display = 'inline-block';  
+    pollTimer = setInterval(updateFaces, 1000);  
+    updateFaces();  
+}  
+  
+function stopScanning() {  
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }  
+    document.getElementById('videoStream').src = '';  
+    document.getElementById('scanOverlay').style.display = 'flex';  
+    document.getElementById('btnStop').style.display = 'none';  
+    document.getElementById('videoPanel').classList.remove('edge-green', 'edge-red', 'edge-blue', 'edge-gold');  
+    facesList.innerHTML = '<div style="opacity:.6;text-align:center">Scanning stopped</div>';  
+    facesCount.textContent = '--';  
+}  
+</script>  
+</body>  
+</html>  
+"""
+# =============================================================================  
+# Flask App + Detection Thread  
+# =============================================================================  
+  
+app          = Flask(__name__)  
+output_frame = None  
+raw_frame    = None  
+lock         = threading.Lock()  
+face_results = []  
+  
+det_sess_g   = None  
+cava_sess_g  = None  
+anchors_g    = None  
+db_g         = None  
+  
+# Challenge state  
+challenge_active = False  
+challenge_question = ""  
+challenge_answer = -1  
+challenge_person = ""  
+challenge_detected_fingers = -1  
+challenge_status = "idle"  # idle, active, correct, wrong  
+challenge_start_time = 0  
+challenge_stable_count = 0  
+challenge_last_finger = -1  
+CHALLENGE_STABLE_THRESHOLD = 8  
+CHALLENGE_TIMEOUT = 15  
+  
+finger_counter = None  
+current_finger_count = -1  
+  
+  
+def detection_thread(camera_id: int, threshold: float, skip_frames: int = 1) -> None:  
+    global output_frame, raw_frame, lock, face_results  
+    global challenge_active, challenge_detected_fingers, challenge_status  
+    global challenge_stable_count, challenge_last_finger, challenge_answer  
+    global current_finger_count  
+  
+    cap = cv2.VideoCapture(camera_id)  
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  
+  
+    if not cap.isOpened():  
+        print(f"Error: Could not open camera {camera_id}")  
+        return  
+  
+    print("Camera opened successfully")  
+  
+    frame_count = 0  
+    last_faces  = []  
+  
+    while True:  
+        ret, frame = cap.read()  
+        if not ret:  
+            time.sleep(0.05)  
+            continue  
+  
+        with lock:  
+            raw_frame = frame.copy()  
+  
+        frame_count += 1  
+  
+        if frame_count % (skip_frames + 1) == 1:  
+            img_rgb    = frame[:, :, ::-1]  
+            detections = detect_faces(img_rgb, det_sess_g, anchors_g)  
+  
+            faces = []  
+            for det in detections:  
+                aligned = det["aligned"]  
+                if aligned is None:  
+                    continue  
+  
+                emb  = get_embedding(aligned, cava_sess_g)  
+                name, similarity = db_g.search(emb, threshold=threshold)  
+  
+                faces.append({  
+                    "bbox":            det["bbox"],  
+                    "detection_score": det["score"],  
+                    "embedding":       emb,  
+                    "name":            name,  
+                    "similarity":      similarity,  
+                    "identified":      name is not None,  
+                })  
+  
+            if len(faces) > 1:  
+                seen: dict[str, int] = {}  
+                for i, face in enumerate(faces):  
+                    if not face["identified"]:  
+                        continue  
+                    n = face["name"]  
+                    if n not in seen or face["similarity"] > faces[seen[n]]["similarity"]:  
+                        seen[n] = i  
+  
+                best_indices = set(seen.values())  
+                for i, face in enumerate(faces):  
+                    if face["identified"] and i not in best_indices:  
+                        face["name"]       = None  
+                        face["similarity"] = 0.0  
+                        face["identified"] = False  
+  
+            last_faces = faces  
+  
+        annotated = frame.copy()  
+        for face in last_faces:  
+            x1, y1, x2, y2 = [int(v) for v in face["bbox"]]  
+  
+            if face["identified"]:  
+                color = (0, 255, 0)  
+                label = f"{face['name']} ({face['similarity']:.2f})"  
+            else:  
+                color = (0, 0, 255)  
+                label = "Unknown"  
+  
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)  
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)  
+            cv2.rectangle(annotated, (x1, y1 - th - 10), (x1 + tw, y1), color, -1)  
+            cv2.putText(annotated, label, (x1, y1 - 5),  
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)  
+  
+        # --- Always-on finger counting ---  
+        if finger_counter is not None:  
+            finger_count, debug_info = finger_counter.count_fingers(frame)  
+            current_finger_count = finger_count  
+            finger_counter.draw_roi(annotated, finger_count, active=True)  
+  
+            # --- Challenge logic (if active) ---  
+            if challenge_active:  
+                challenge_detected_fingers = finger_count  
+  
+                if finger_count >= 0:  
+                    if finger_count == challenge_last_finger:  
+                        challenge_stable_count += 1  
+                    else:  
+                        challenge_stable_count = 0  
+                        challenge_last_finger = finger_count  
+  
+                    if challenge_stable_count >= CHALLENGE_STABLE_THRESHOLD and challenge_status == "active":  
+                        if finger_count == challenge_answer:  
+                            challenge_status = "correct"  
+                            challenge_active = False  
+                        else:  
+                            challenge_status = "wrong"  
+                            challenge_active = False  
+                else:  
+                    challenge_stable_count = 0  
+  
+        with lock:  
+            output_frame = annotated.copy()  
+            face_results = last_faces.copy()  
+  
+    cap.release()  
+  
+  
+def generate_frames():  
+    global output_frame, lock  
+    while True:  
+        with lock:  
+            if output_frame is None:  
+                time.sleep(0.05)  
+                continue  
+            ok, encoded = cv2.imencode(".jpg", output_frame)  
+            if not ok:  
+                continue  
+            frame_bytes = bytearray(encoded)  
+  
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"  
+               + frame_bytes + b"\r\n")  
+        time.sleep(0.033)  
+  
+  
+def generate_raw_frames():  
+    global raw_frame, lock  
+    while True:  
+        with lock:  
+            if raw_frame is None:  
+                time.sleep(0.05)  
+                continue  
+            ok, encoded = cv2.imencode(".jpg", raw_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])  
+            if not ok:  
+                continue  
+            frame_bytes = bytearray(encoded)  
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"  
+               + frame_bytes + b"\r\n")  
+        time.sleep(0.033)  
+  
+  
+def generate_finger_frames():  
+    """MJPEG stream with finger detection overlay only (no face detection)."""  
+    global raw_frame, lock, finger_counter, current_finger_count  
+    while True:  
+        with lock:  
+            if raw_frame is None:  
+                time.sleep(0.05)  
+                continue  
+            frame = raw_frame.copy()  
+  
+        if finger_counter is not None:  
+            fc, _ = finger_counter.count_fingers(frame)  
+            finger_counter.draw_roi(frame, fc, active=True)  
+  
+        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])  
+        if not ok:  
+            continue  
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"  
+               + bytearray(encoded) + b"\r\n")  
+        time.sleep(0.033)  
+  
+  
+# =============================================================================  
+# Routes  
+# =============================================================================  
+  
+@app.route("/")  
+def index():  
+    return render_template_string(HTML_TEMPLATE)  
+  
+  
+@app.route("/video_feed")  
+def video_feed():  
+    return Response(generate_frames(),  
+                    mimetype="multipart/x-mixed-replace; boundary=frame")  
+  
+  
+@app.route("/get_faces")  
+def get_faces():  
+    global face_results, db_g, current_finger_count  
+    with lock:  
+        faces = [  
+            {  
+                "bbox":            f["bbox"],  
+                "detection_score": f["detection_score"],  
+                "name":            f["name"],  
+                "similarity":      float(f["similarity"]),  
+                "identified":      f["identified"],  
+            }  
+            for f in face_results  
+        ]  
+    return jsonify({  
+        "faces": faces,  
+        "db_size": len(db_g),  
+        "finger_count": current_finger_count,  
+    })  
+  
+  
+@app.route("/raw_feed")  
+def raw_feed():  
+    return Response(generate_raw_frames(),  
+                    mimetype="multipart/x-mixed-replace; boundary=frame")  
+  
+  
+@app.route("/finger_feed")  
+def finger_feed():  
+    return Response(generate_finger_frames(),  
+                    mimetype="multipart/x-mixed-replace; boundary=frame")  
+  
+  
+@app.route("/get_finger_count")  
+def get_finger_count():  
+    return jsonify({"finger_count": current_finger_count})  
+  
+  
+# =============================================================================  
+# Challenge routes  
+# =============================================================================  
+  
+def generate_challenge():  
+    """Generate a simple math question whose answer is 0-5."""  
+    answer = random.randint(1, 5)  
+    op = random.choice(["add", "sub"])  
+    if op == "add":  
+        a = random.randint(0, answer)  
+        b = answer - a  
+        question = f"{a} + {b} = ?"  
+    else:  
+        a = random.randint(answer, 5)  
+        b = a - answer  
+        question = f"{a} - {b} = ?"  
+    return question, answer  
+  
+  
+@app.route("/start_challenge", methods=["POST"])  
+def start_challenge():  
+    global challenge_active, challenge_question, challenge_answer  
+    global challenge_person, challenge_status, challenge_start_time  
+    global challenge_stable_count, challenge_last_finger, challenge_detected_fingers  
+  
+    data = request.get_json() or {}  
+    person = data.get("person", "unknown")  
+  
+    question, answer = generate_challenge()  
+    challenge_active = True  
+    challenge_question = question  
+    challenge_answer = answer  
+    challenge_person = person  
+    challenge_status = "active"  
+    challenge_start_time = time.time()  
+    challenge_stable_count = 0  
+    challenge_last_finger = -1  
+    challenge_detected_fingers = -1  
+  
+    return jsonify({  
+        "status": "active",  
+        "question": question,  
+        "person": person,  
+    })  
+  
+  
+@app.route("/get_challenge")  
+def get_challenge():  
+    global challenge_active, challenge_status, challenge_detected_fingers  
+    global challenge_question, challenge_answer, challenge_person, challenge_start_time  
+  
+    elapsed = time.time() - challenge_start_time if challenge_active else 0  
+    remaining = max(0, CHALLENGE_TIMEOUT - elapsed) if challenge_active else 0  
+  
+    if challenge_active and elapsed > CHALLENGE_TIMEOUT and challenge_status == "active":  
+        challenge_status = "timeout"  
+        challenge_active = False  
+  
+    return jsonify({  
+        "active": challenge_active,  
+        "status": challenge_status,  
+        "question": challenge_question,  
+        "person": challenge_person,  
+        "detected_fingers": challenge_detected_fingers,  
+        "expected_answer": challenge_answer if challenge_status != "active" else -1,  
+        "remaining": round(remaining, 1),  
+    })  
+  
+  
+@app.route("/reset_challenge", methods=["POST"])  
+def reset_challenge():  
+    global challenge_active, challenge_status, challenge_detected_fingers  
+    global challenge_question, challenge_answer, challenge_person  
+    challenge_active = False  
+    challenge_status = "idle"  
+    challenge_detected_fingers = -1  
+    challenge_question = ""  
+    challenge_answer = -1  
+    challenge_person = ""  
+    return jsonify({"status": "idle"})  
+  
+  
+# =============================================================================  
+# Test pages  
+# =============================================================================  
+  
+@app.route("/test_camera")  
+def test_camera_page():  
+    return render_template_string("""  
+    <!DOCTYPE html>  
+    <html>  
+    <head>  
+        <title>Camera Test</title>  
+        <style>  
+            body { background: #1a1a2e; color: #eee; font-family: sans-serif;  
+                   display: flex; flex-direction: column; align-items: center;  
+                   padding: 40px; }  
+            h1 { margin-bottom: 8px; }  
+            p  { opacity: .6; margin-bottom: 20px; }  
+            img { max-width: 100%; border-radius: 12px;  
+                  border: 2px solid #333; }  
+        </style>  
+    </head>  
+    <body>  
+        <h1>Camera Test</h1>  
+        <p>Raw feed &mdash; no face detection / recognition processing</p>  
+        <img src="/raw_feed">  
+    </body>  
+    </html>  
+    """)  
+  
+  
+@app.route("/test_finger")  
+def test_finger_page():  
+    return render_template_string("""  
+    <!DOCTYPE html>  
+    <html>  
+    <head>  
+        <title>Finger Detection Test</title>  
+        <style>  
+            body {  
+                background: #0f172a; color: #f8fafc; font-family: 'Segoe UI', sans-serif;  
+                display: flex; flex-direction: column; align-items: center;  
+                padding: 40px; margin: 0;  
+            }  
+            h1 { margin-bottom: 4px; }  
+            .subtitle { opacity: .6; margin-bottom: 24px; font-size: .9rem; }  
+            .video-box {  
+                border-radius: 16px; overflow: hidden;  
+                border: 2px solid rgba(255,255,255,.15);  
+                margin-bottom: 24px; max-width: 720px; width: 100%;  
+            }  
+            .video-box img { width: 100%; display: block; }  
+            .finger-display {  
+                display: flex; gap: 24px; margin-bottom: 24px;  
+            }  
+            .finger-box {  
+                background: rgba(255,255,255,.08);  
+                border: 1px solid rgba(255,255,255,.15);  
+                border-radius: 16px; padding: 24px 40px;  
+                text-align: center; backdrop-filter: blur(16px);  
+            }  
+            .finger-count {  
+                font-size: 4rem; font-weight: 700; color: #6366f1;  
+            }  
+            .hand-emoji { font-size: 4rem; }  
+            .finger-label {  
+                font-size: .75rem; text-transform: uppercase;  
+                letter-spacing: .15em; opacity: .6; margin-top: 8px;  
+            }  
+            .instructions {  
+                background: rgba(255,255,255,.05);  
+                border: 1px solid rgba(255,255,255,.1);  
+                border-radius: 12px; padding: 20px; max-width: 600px;  
+                font-size: .85rem; line-height: 1.6; opacity: .8;  
+            }  
+            .back-link {  
+                margin-top: 20px; color: #6366f1;  
+                text-decoration: none; font-size: .9rem;  
+            }  
+            .back-link:hover { text-decoration: underline; }  
+        </style>  
+    </head>  
+    <body>  
+        <h1>Finger Detection Test</h1>  
+        <p class="subtitle">MediaPipe Hand Landmark via TFLite &mdash; always-on detection</p>  
+        <div class="video-box">  
+            <img src="/finger_feed">  
+        </div>  
+        <div class="finger-display">  
+            <div class="finger-box">  
+                <div class="finger-count" id="fcDisplay">--</div>  
+                <div class="finger-label">Fingers Detected</div>  
+            </div>  
+            <div class="finger-box">  
+                <div class="hand-emoji" id="handEmoji">&#9995;</div>  
+                <div class="finger-label">Hand Status</div>  
+            </div>  
+        </div>  
+        <div class="instructions">  
+            <strong>How to use:</strong><br>  
+            1. Hold your hand in front of the camera.<br>  
+            2. Show 0-5 fingers clearly.<br>  
+            3. Works best with good lighting.<br>  
+            4. Closed fist = 0 fingers. Open palm = 5 fingers.  
+        </div>  
+        <a class="back-link" href="/">&larr; Back to Face Recognition</a>  
+        <script>  
+        const HAND_EMOJIS = ['&#9994;', '&#9757;', '&#9996;', '&#129304;', '&#128399;', '&#128400;'];  
+        function updateFC() {  
+            fetch('/get_finger_count')  
+                .then(r => r.json())  
+                .then(data => {  
+                    const c = data.finger_count;  
+                    document.getElementById('fcDisplay').textContent = c >= 0 ? c : '--';  
+                    document.getElementById('handEmoji').innerHTML =  
+                        (c >= 0 && c <= 5) ? HAND_EMOJIS[c] : '&#10067;';  
+                });  
+        }  
+        setInterval(updateFC, 500);  
+        updateFC();  
+        </script>  
+    </body>  
+    </html>  
+    """)  
+  
+  
+# =============================================================================  
+# Main  
+# =============================================================================  
+  
+def main():  
+    global det_sess_g, cava_sess_g, anchors_g, db_g, finger_counter  
+  
+    parser = argparse.ArgumentParser(  
+        description="Web-Based Face Recognition — Local v2 (ONNX + TFLite)"  
+    )  
+    parser.add_argument("--camera",    type=int,   default=0,  
+                        help="Camera ID (default: 0)")  
+    parser.add_argument("--datasets",  default="",  
+                        help="Path to datasets folder (sub-folder name = person name)")  
+    parser.add_argument("--db",        default="face_db_local.npz",  
+                        help="Face database file (default: face_db_local.npz)")  
+    parser.add_argument("--detector",  default="FaceDetector.onnx",  
+                        help="Path to FaceDetector.onnx")  
+    parser.add_argument("--cavaface",  default="cavaface.onnx",  
+                        help="Path to cavaface.onnx")      
+    parser.add_argument("--threshold", type=float, default=0.45,  
+                        help="Cosine similarity threshold (default: 0.45)")  
+    parser.add_argument("--skip-frames", type=int, default=1,  
+                        help="Process every N+1 frames (default: 1)")  
+    parser.add_argument("--host",      default="0.0.0.0")  
+    parser.add_argument("--port",      type=int, default=5001)  
+    args = parser.parse_args()  
+  
+    print("=" * 60)  
+    print("Face Recognition System  [LOCAL v2 / ONNX + TFLite]")  
+    print("=" * 60)  
+  
+    # Load face models  
+    print("\nLoading models ...")  
+    if not Path(args.detector).exists():  
+        print(f"  ✗ FaceDetector not found: {args.detector}")  
+        print("    Specify with --detector /path/to/FaceDetector.onnx")  
+        return 1  
+    if not Path(args.cavaface).exists():  
+        print(f"  ✗ CavaFace not found: {args.cavaface}")  
+        print("    Specify with --cavaface /path/to/cavaface.onnx")  
+        return 1  
+  
+    orig_dir = os.getcwd()  
+  
+    detector_path = Path(args.detector).resolve()  
+    os.chdir(detector_path.parent)  
+    det_sess_g = ort.InferenceSession(detector_path.name)  
+    os.chdir(orig_dir)  
+    print("  ✓ FaceDetector loaded")  
+  
+    cavaface_path = Path(args.cavaface).resolve()  
+    os.chdir(cavaface_path.parent)  
+    cava_sess_g = ort.InferenceSession(cavaface_path.name)  
+    os.chdir(orig_dir)  
+    print("  ✓ CavaFace loaded")  
+  
+    anchors_g = generate_anchors()  
+  
+    # Load / build database  
+    print("\nInitializing database ...")  
+    db_g = FaceDB(args.db)  
+  
+    if args.datasets:  
+        build_database_from_folder(  
+            args.datasets, det_sess_g, anchors_g, cava_sess_g, db_g  
+        )  
+    else:  
+        print("  (No --datasets specified — using existing database only)")  
+  
+    if len(db_g) == 0:  
+        print("  ⚠ Database is empty — everyone will appear as Unknown")  
+    else:  
+        print(f"  ✓ Database ready: {list(db_g.embeddings.keys())}")  
+  
+    # Start detection thread  
+    print("\nStarting camera ...")  
+    t = threading.Thread(  
+        target=detection_thread,  
+        args=(args.camera, args.threshold, args.skip_frames),  
+        daemon=True,  
+    )  
+    t.start()  
+    time.sleep(1)  
+  
+    print(f"\n{'='*60}")  
+    print("  Open your browser:")  
+    print(f"  http://localhost:{args.port}")  
+    print(f"  Camera test: http://localhost:{args.port}/test_camera")  
+    print(f"  Finger test: http://localhost:{args.port}/test_finger")  
+    print(f"\n  Press Ctrl+C to stop")  
+    print(f"{'='*60}\n")  
+  
+    try:  
+        app.run(host=args.host, port=args.port, threaded=True, debug=False)  
+    except KeyboardInterrupt:  
+        print("\nShutting down ...")  
+    return 0  
+  
+  
+if __name__ == "__main__":  
+    exit(main())
