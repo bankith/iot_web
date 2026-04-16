@@ -15,11 +15,13 @@ except ImportError:
         from tensorflow.lite.python.interpreter import Interpreter
 
 # =============================================================================
-# Global Protection
+# Global Variables & Locks
 # =============================================================================
 shared_frame_lock = threading.Lock()
 ai_lock = threading.Lock()
+
 shared_frame = None
+last_known_box = None  # Stores the box so the camera thread doesn't have to do math
 
 # =============================================================================
 # Face Detector Class (Qualcomm Grid Version)
@@ -32,7 +34,7 @@ class FaceDetectorTFLite:
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
         
-        # Read exact dimensions from the model
+        # Read exact dimensions from the model (Expects 640x480 Grayscale)
         shape = self.input_details[0]['shape']
         self.input_height = shape[1] 
         self.input_width = shape[2]
@@ -46,10 +48,12 @@ class FaceDetectorTFLite:
             # 1. Grayscale Conversion & Resizing
             img_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             img_resized = cv2.resize(img_gray, (self.input_width, self.input_height))
+            
+            # Format to [1, Height, Width, 1] for the AI
             img_resized = np.expand_dims(img_resized, axis=-1) 
             input_data = np.expand_dims(img_resized.astype(np.float32) / 255.0, axis=0)
 
-            # 2. Run AI
+            # 2. Run Inference
             self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
             self.interpreter.invoke()
 
@@ -68,31 +72,29 @@ class FaceDetectorTFLite:
 
             if boxes is None or scores is None: return None
 
-            # 4. Find the best face
+            # 4. Find the highest confidence face
             best_idx = np.argmax(scores)
             best_score = scores[best_idx]
             
-            # Convert raw model score to 0.0-1.0 probability
+            # Convert raw logit score to 0.0-1.0 probability
             if best_score > 1.0 or best_score < 0.0:
                 best_score = 1.0 / (1.0 + np.exp(-np.clip(best_score, -100, 100)))
 
             if best_score > self.score_threshold:
-                # Find the center of the face using the Grid Index (60x80 grid)
+                # Find center of the face using the 60x80 Grid
                 grid_y = best_idx // 80
                 grid_x = best_idx % 80
                 
                 cx_norm = grid_x / 80.0
                 cy_norm = grid_y / 60.0
 
-                # Use the raw box values for width/height in "grid tiles"
-                # v2 and v3 act as height and width offsets
+                # Read raw width/height in "grid tiles"
                 raw_h, raw_w = boxes[best_idx][2], boxes[best_idx][3]
                 
-                # Approximate width and height normalized to 0.0-1.0
                 w_norm = raw_w / 80.0
                 h_norm = raw_h / 60.0
 
-                # Calculate standard pixel coordinates
+                # Convert grid percentages to actual screen pixels
                 px = int((cx_norm - w_norm/2) * w)
                 py = int((cy_norm - h_norm/2) * h)
                 pw = int(w_norm * w)
@@ -100,36 +102,39 @@ class FaceDetectorTFLite:
 
                 return {
                     "box": [max(0, px), max(0, py), pw, ph],
-                    "ratio": w_norm * h_norm, # Percentage of screen taken
+                    "ratio": w_norm * h_norm, # Used to measure distance
                     "score": float(best_score)
                 }
             return None
 
 # =============================================================================
-# Flask App Logic
+# Flask Server Logic
 # =============================================================================
 
 app = Flask(__name__)
 face_detector = None
 
 def camera_thread():
-    global shared_frame, face_detector
-    cap = cv2.VideoCapture(1)
+    """ Runs as fast as possible. Draws the box from memory to prevent lag. """
+    global shared_frame, last_known_box
+    
+    # Using index 1 for Linux/IoT external cameras
+    cap = cv2.VideoCapture(1) 
+    
     while True:
         ret, frame = cap.read()
         if ret:
             frame = cv2.flip(frame, 1)
             
-            # Live Blue Box for debugging
-            res = face_detector.detect(frame)
-            if res:
-                bx, by, bw, bh = res["box"]
+            # Instantly draw the last seen box without running the heavy AI
+            if last_known_box:
+                bx, by, bw, bh = last_known_box
                 cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), (255, 0, 0), 2)
             
             with shared_frame_lock:
                 shared_frame = frame.copy()
         else:
-            time.sleep(0.1)
+            time.sleep(0.01)
 
 @app.route("/")
 def index():
@@ -144,25 +149,32 @@ def video_feed():
                 ok, encoded = cv2.imencode(".jpg", shared_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             if ok:
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + bytearray(encoded) + b"\r\n")
-            time.sleep(0.03)
+            time.sleep(0.03) # Limit stream to ~30 FPS
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 @app.route("/check_proximity", methods=["POST"])
 def check_proximity():
+    """ Runs the AI only when the web frontend asks for it (every 500ms) """
+    global last_known_box
+
     with shared_frame_lock:
         if shared_frame is None: return jsonify({"status": "no_frame"})
         frame = shared_frame.copy()
 
+    # The AI ONLY runs here
     res = face_detector.detect(frame)
     if not res:
+        last_known_box = None # Clear the box if you walk away
         return jsonify({"status": "no_face", "instruction": "Searching for Face...", "ratio": 0})
 
+    # Save to memory so the camera thread can draw it smoothly
     bx, by, bw, bh = res["box"]
     ratio = res["ratio"]
+    last_known_box = [bx, by, bw, bh] 
 
     # --- PROXIMITY LOGIC ---
     status = "wait"
-    if ratio < 0.05: # Adjusted for Grid scaling
+    if ratio < 0.05: 
         instruction = "Move Closer"
     elif ratio > 0.18:
         instruction = "Too Close! Move Back"
@@ -170,6 +182,7 @@ def check_proximity():
         instruction = "Perfect! Scanning..."
         status = "success"
 
+    # Draw the final success/wait box for the snapshot preview
     color = (0, 255, 0) if status == "success" else (0, 165, 255)
     cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), color, 3)
     
@@ -179,7 +192,7 @@ def check_proximity():
     return jsonify({"status": status, "instruction": instruction, "ratio": float(ratio), "image": img_b64})
 
 # =============================================================================
-# UI Design
+# HTML / UI Design (with 500ms polling)
 # =============================================================================
 
 HTML_TEMPLATE = """
@@ -221,30 +234,41 @@ HTML_TEMPLATE = """
     </div>
     <script>
         let active = false;
+        
         function start() {
             active = true;
-            document.getElementById('btn').disabled = true;
+            document.getElementById('btn').innerText = "Scanning Continuously...";
+            document.getElementById('btn').disabled = true; // Keep button disabled while running
             loop();
         }
+        
         function loop() {
             if(!active) return;
+            
             fetch('/check_proximity', {method:'POST'})
             .then(r => r.json())
             .then(d => {
                 if(d.status !== "no_frame") {
                     document.getElementById('instruction').innerText = d.instruction;
+                    
+                    // Update progress bar
                     let p = Math.min(100, (d.ratio / 0.18) * 100);
                     document.getElementById('bar').style.width = p + "%";
+                    
+                    // If perfect, update the snapshot, but DO NOT stop the loop
                     if(d.status === "success") {
-                        active = false;
                         document.getElementById('snap').src = "data:image/jpeg;base64," + d.image;
                         document.getElementById('snap').style.display = "block";
                         document.getElementById('msg').style.display = "none";
-                        document.getElementById('btn').disabled = false;
-                    } else {
-                        setTimeout(loop, 250);
-                    }
+                    } 
+                    
+                    // ALWAYS loop again after 500ms, no matter what!
+                    setTimeout(loop, 500);
                 }
+            })
+            .catch(() => { 
+                // If there's a temporary network hiccup, try again in 1 second
+                if(active) setTimeout(loop, 1000); 
             });
         }
     </script>
