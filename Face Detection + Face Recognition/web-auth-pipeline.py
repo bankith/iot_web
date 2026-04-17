@@ -367,10 +367,10 @@ def process_frame():
         last_known_face = [max(0, bx), max(0, by), bw, bh]
 
         ratio = (bw * bh) / (W * H)
-        
-        if ratio < 0.05:
+                
+        if ratio < 0.2:
             return jsonify({"status": "wait", "instruction": "Move Closer", "ratio": ratio})
-        elif ratio > 0.22:
+        elif ratio > 0.4:
             return jsonify({"status": "wait", "instruction": "Too Close! Move Back", "ratio": ratio})
         
         # Perfect distance -> Verify Identity
@@ -440,57 +440,98 @@ HTML_TEMPLATE = """
     <title>Multi-Factor Face & Gesture ID</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        /* Custom neon glow effects */
         .glow-blue { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
         .glow-green { box-shadow: 0 0 20px rgba(16, 185, 129, 0.3); }
+        .fade-in { animation: fadeIn 0.5s ease-in forwards; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
-<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black">
+<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black relative">
 
-    <div class="mb-10 text-center">
+    <div class="mb-8 text-center z-10">
         <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
-            Multi-Factor Authentication
+            Secure Terminal
         </h1>
-        <p class="text-gray-400 mt-3 text-lg font-medium tracking-wide">Military-Grade Local Biometrics</p>
+        <p class="text-gray-400 mt-2 text-sm font-medium tracking-widest uppercase">Multi-Factor Biometrics</p>
     </div>
 
-    <div class="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-8">
+    <div class="w-full max-w-3xl bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 md:p-8 shadow-2xl flex flex-col items-center relative overflow-hidden z-10">
         
-        <div class="bg-gray-900/50 backdrop-blur-xl border border-gray-800 rounded-3xl p-8 shadow-2xl flex flex-col items-center relative overflow-hidden">
-            <div class="absolute -top-24 -left-24 w-48 h-48 bg-blue-500/10 rounded-full blur-3xl"></div>
+        <div class="absolute -top-32 -left-32 w-64 h-64 bg-blue-500/10 rounded-full blur-3xl"></div>
+        <div class="absolute -bottom-32 -right-32 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl"></div>
+        
+        <div id="phaseBadge" class="relative z-10 mb-5 px-5 py-1.5 rounded-full text-xs font-bold tracking-widest uppercase transition-colors duration-300 ring-1" style="background-color: rgba(59,130,246,0.1); color: #60a5fa; ring-color: rgba(59,130,246,0.3);">
+            Step 1: Face ID
+        </div>
+
+        <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-gray-700 shadow-inner flex items-center justify-center z-10 ring-4 ring-black/50">
+            <img src="/video_feed" class="w-full h-full object-cover">
+            <div class="absolute inset-0 pointer-events-none opacity-30">
+                <div class="absolute top-4 left-4 w-8 h-8 border-t-2 border-l-2 border-white"></div>
+                <div class="absolute top-4 right-4 w-8 h-8 border-t-2 border-r-2 border-white"></div>
+                <div class="absolute bottom-4 left-4 w-8 h-8 border-b-2 border-l-2 border-white"></div>
+                <div class="absolute bottom-4 right-4 w-8 h-8 border-b-2 border-r-2 border-white"></div>
+            </div>
+        </div>
+
+        <div id="instruction" class="text-2xl font-bold h-10 flex items-center justify-center text-center transition-colors duration-300 mt-6 z-10" style="color: #60a5fa;">
+            System Ready
+        </div>
+
+        <div id="barWrap" class="w-full mt-2 mb-6 z-10">
+            <div class="h-2 w-full bg-gray-800 rounded-full overflow-hidden ring-1 ring-white/5">
+                <div id="bar" class="h-full w-0 transition-all duration-300 ease-out" style="background-color: #3b82f6;"></div>
+            </div>
+        </div>
+
+        <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-3 mb-6 z-10">
+            <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
+                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Identity</div>
+                <div id="info-name" class="font-mono font-bold text-gray-300">--</div>
+            </div>
+            <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
+                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Proximity</div>
+                <div id="info-dist" class="font-mono font-bold text-gray-300">--</div>
+            </div>
+            <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
+                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Auth Phase</div>
+                <div id="info-phase" class="font-mono font-bold text-blue-400">Face</div>
+            </div>
+            <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
+                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Liveness</div>
+                <div id="info-gesture" class="font-mono font-bold text-gray-300">Pending</div>
+            </div>
+        </div>
+
+        <button id="btn" onclick="start()" class="z-10 w-full px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 glow-blue transform transition-all duration-200 hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none">
+            Initialize Login
+        </button>
+    </div>
+
+    <div id="debugPanel" class="fixed bottom-6 right-6 w-[22rem] bg-gray-900/90 backdrop-blur-md border border-gray-700 rounded-2xl p-3 shadow-2xl z-50 hidden fade-in">
+        <div class="flex items-center justify-between mb-2 px-1">
+            <h3 class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Capture Log</h3>
+            <div class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+        </div>
+        
+        <div class="grid grid-cols-2 gap-2">
             
-            <div id="phaseBadge" class="relative z-10 mb-6 px-5 py-1.5 rounded-full text-sm font-bold tracking-wide transition-colors duration-300 ring-1" style="background-color: rgba(59,130,246,0.1); color: #60a5fa; ring-color: rgba(59,130,246,0.3);">
-                Step 1: Face ID
-            </div>
-
-            <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-gray-950 border border-gray-700 shadow-inner flex items-center justify-center z-10">
-                <img src="/video_feed" class="w-full h-full object-cover">
-            </div>
-
-            <div id="instruction" class="text-2xl font-bold h-12 flex items-center justify-center text-center transition-colors duration-300 mt-6 z-10" style="color: #60a5fa;">
-                System Ready
-            </div>
-
-            <div id="barWrap" class="w-full mt-2 mb-8 z-10">
-                <div class="h-3 w-full bg-gray-800 rounded-full overflow-hidden ring-1 ring-white/5">
-                    <div id="bar" class="h-full w-0 transition-all duration-300 ease-out" style="background-color: #3b82f6;"></div>
+            <div class="flex flex-col">
+                <div class="text-[9px] text-gray-500 text-center uppercase tracking-widest mb-1">1. Face</div>
+                <div class="w-full aspect-[4/3] bg-black rounded-lg border border-gray-800 flex items-center justify-center overflow-hidden relative">
+                    <span id="msgFace" class="text-[10px] text-gray-600 font-mono animate-pulse text-center">Waiting...</span>
+                    <img id="snapFace" src="" class="hidden w-full h-full object-cover">
                 </div>
             </div>
 
-            <button id="btn" onclick="start()" class="z-10 w-full md:w-2/3 px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 glow-blue transform transition-all duration-200 hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none">
-                Initialize Login
-            </button>
-        </div>
-
-        <div class="bg-gray-900/50 backdrop-blur-xl border border-gray-800 rounded-3xl p-8 shadow-2xl flex flex-col relative overflow-hidden">
-             <div class="absolute -bottom-24 -right-24 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl"></div>
-
-            <h3 class="text-xl font-semibold text-gray-300 mb-6 text-center z-10 tracking-wide">Verification Snapshot</h3>
-            
-            <div class="flex-1 w-full bg-gray-950/80 rounded-2xl border-2 border-dashed border-gray-700 flex items-center justify-center overflow-hidden relative min-h-[350px] z-10">
-                <span id="msg" class="text-gray-500 font-medium animate-pulse text-center px-4">Awaiting biometric data...</span>
-                <img id="snap" src="" class="hidden w-full h-full object-contain p-2 rounded-xl">
+            <div class="flex flex-col">
+                <div class="text-[9px] text-gray-500 text-center uppercase tracking-widest mb-1">2. Liveness</div>
+                <div class="w-full aspect-[4/3] bg-black rounded-lg border border-gray-800 flex items-center justify-center overflow-hidden relative">
+                    <span id="msgGesture" class="text-[10px] text-gray-600 font-mono animate-pulse text-center">Waiting...</span>
+                    <img id="snapGesture" src="" class="hidden w-full h-full object-cover">
+                </div>
             </div>
+            
         </div>
     </div>
 
@@ -498,15 +539,12 @@ HTML_TEMPLATE = """
         let active = false;
         let currentPhase = "face";
         
-        // Tailwind Palette Hex Codes for JS Manipulation
         const colors = {
-            blue: "#3b82f6",
-            blueLight: "#60a5fa",
+            blue: "#3b82f6", blueLight: "#60a5fa",
             red: "#ef4444",
-            orange: "#f97316",
-            orangeLight: "#fb923c",
-            green: "#10b981",
-            greenLight: "#34d399"
+            orange: "#f97316", orangeLight: "#fb923c",
+            green: "#10b981", greenLight: "#34d399",
+            gray: "#9ca3af"
         };
 
         function setBadge(text, color, lightColor) {
@@ -528,7 +566,24 @@ HTML_TEMPLATE = """
             const btn = document.getElementById('btn');
             btn.innerText = "Scanning Environment...";
             btn.disabled = true;
+            
+            document.getElementById('debugPanel').style.display = 'block'; 
             document.getElementById('barWrap').style.display = "block";
+            
+            // Reset readouts
+            document.getElementById('info-name').innerText = "--";
+            document.getElementById('info-name').style.color = colors.gray;
+            document.getElementById('info-gesture').innerText = "Pending";
+            document.getElementById('info-gesture').style.color = colors.gray;
+            document.getElementById('info-phase').innerText = "Face";
+            document.getElementById('info-phase').style.color = colors.blueLight;
+
+            // Reset images
+            document.getElementById('snapFace').style.display = "none";
+            document.getElementById('msgFace').style.display = "block";
+            document.getElementById('snapGesture').style.display = "none";
+            document.getElementById('msgGesture').style.display = "block";
+
             setBadge("Step 1: Face ID", colors.blue, colors.blueLight);
             loop();
         }
@@ -550,8 +605,11 @@ HTML_TEMPLATE = """
                     
                     // --- FACE PHASE LOGIC ---
                     if (currentPhase === "face") {
-                        let p = Math.min(100, (d.ratio / 0.22) * 100);
+                        // Change 0.60 back to whatever your max zoom limit is in your Python script
+                        let p = Math.min(100, (d.ratio / 0.60) * 100); 
                         bar.style.width = p + "%";
+                        
+                        document.getElementById('info-dist').innerText = (d.ratio > 0 ? p.toFixed(0) + "%" : "--");
                         
                         if (d.instruction.includes("Intruder")) {
                             inst.style.color = colors.red;
@@ -563,12 +621,19 @@ HTML_TEMPLATE = """
 
                         if(d.status === "identified") {
                             currentPhase = "gesture"; 
-                            document.getElementById('snap').src = "data:image/jpeg;base64," + d.image;
-                            document.getElementById('snap').style.display = "block";
-                            document.getElementById('msg').style.display = "none";
+                            
+                            // LOCK IN FACE SNAPSHOT
+                            document.getElementById('snapFace').src = "data:image/jpeg;base64," + d.image;
+                            document.getElementById('snapFace').style.display = "block";
+                            document.getElementById('msgFace').style.display = "none";
+                            
+                            document.getElementById('info-name').innerText = d.name;
+                            document.getElementById('info-name').style.color = colors.greenLight;
+                            document.getElementById('info-phase').innerText = "Liveness";
+                            document.getElementById('info-phase').style.color = colors.orangeLight;
                             
                             document.getElementById('barWrap').style.display = "none";
-                            setBadge("Step 2: Liveness (Gesture)", colors.orange, colors.orangeLight);
+                            setBadge("Step 2: Liveness", colors.orange, colors.orangeLight);
                             inst.style.color = colors.orangeLight;
                         }
                     } 
@@ -576,7 +641,10 @@ HTML_TEMPLATE = """
                     // --- GESTURE PHASE LOGIC ---
                     else if (currentPhase === "gesture") {
                         if (d.image) {
-                            document.getElementById('snap').src = "data:image/jpeg;base64," + d.image;
+                            // STREAM GESTURE SNAPSHOT
+                            document.getElementById('snapGesture').src = "data:image/jpeg;base64," + d.image;
+                            document.getElementById('snapGesture').style.display = "block";
+                            document.getElementById('msgGesture').style.display = "none";
                         }
                         
                         if(d.status === "success") {
@@ -584,9 +652,14 @@ HTML_TEMPLATE = """
                             inst.style.color = colors.greenLight;
                             setBadge("✅ Fully Unlocked", colors.green, colors.greenLight);
                             
+                            document.getElementById('info-gesture').innerText = "Victory ✌️";
+                            document.getElementById('info-gesture').style.color = colors.greenLight;
+                            document.getElementById('info-phase').innerText = "Unlocked";
+                            document.getElementById('info-phase').style.color = colors.greenLight;
+                            
                             const btn = document.getElementById('btn');
                             btn.innerText = "Authentication Successful";
-                            btn.className = "z-10 w-full md:w-2/3 px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-emerald-600 to-emerald-500 glow-green transform transition-all duration-200 disabled:opacity-100 disabled:cursor-default";
+                            btn.className = "z-10 w-full px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-emerald-600 to-emerald-500 glow-green transform transition-all duration-200 disabled:opacity-100 disabled:cursor-default";
                         }
                     }
                     
