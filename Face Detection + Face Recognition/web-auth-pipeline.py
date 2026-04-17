@@ -433,54 +433,103 @@ def process_frame():
 # =============================================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Multi-Factor Face & Gesture ID</title>
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { background: #0e0e12; color: #fff; font-family: 'Segoe UI', sans-serif; text-align: center; }
-        .wrap { display: flex; justify-content: center; gap: 30px; padding: 40px; flex-wrap: wrap; }
-        .panel { background: #1c1c24; padding: 20px; border-radius: 15px; border: 1px solid #333; width: 500px; }
-        img { width: 100%; border-radius: 10px; border: 2px solid #222; }
-        #instruction { font-size: 1.6rem; font-weight: bold; margin: 20px 0; color: #00d4ff; min-height: 50px; }
-        .bar-container { background: #222; height: 12px; border-radius: 6px; overflow: hidden; margin: 10px 0; }
-        #bar { background: #00ff88; height: 100%; width: 0%; transition: 0.2s; }
-        button { background: #00d4ff; color: #000; border: none; padding: 15px 40px; border-radius: 30px; font-size: 1.1rem; font-weight: bold; cursor: pointer; transition: 0.2s; }
-        button:hover { background: #00ff88; transform: scale(1.05); }
-        button:disabled { background: #444; color: #888; transform: none; }
-        .badge { background: #ff9966; color: #000; padding: 5px 15px; border-radius: 20px; font-size: 0.9rem; font-weight: bold; display: inline-block; margin-bottom: 15px;}
+        /* Custom neon glow effects */
+        .glow-blue { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
+        .glow-green { box-shadow: 0 0 20px rgba(16, 185, 129, 0.3); }
     </style>
 </head>
-<body>
-    <h1 style="margin-top:30px;">🔒 Multi-Factor Authentication</h1>
-    <div class="wrap">
-        <div class="panel">
-            <div class="badge" id="phaseBadge">Step 1: Face ID</div>
-            <img src="/video_feed">
-            <div id="instruction">Ready</div>
-            <div class="bar-container" id="barWrap"><div id="bar"></div></div>
-            <br>
-            <button id="btn" onclick="start()">Start Login</button>
+<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black">
+
+    <div class="mb-10 text-center">
+        <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
+            Multi-Factor Authentication
+        </h1>
+        <p class="text-gray-400 mt-3 text-lg font-medium tracking-wide">Military-Grade Local Biometrics</p>
+    </div>
+
+    <div class="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-8">
+        
+        <div class="bg-gray-900/50 backdrop-blur-xl border border-gray-800 rounded-3xl p-8 shadow-2xl flex flex-col items-center relative overflow-hidden">
+            <div class="absolute -top-24 -left-24 w-48 h-48 bg-blue-500/10 rounded-full blur-3xl"></div>
+            
+            <div id="phaseBadge" class="relative z-10 mb-6 px-5 py-1.5 rounded-full text-sm font-bold tracking-wide transition-colors duration-300 ring-1" style="background-color: rgba(59,130,246,0.1); color: #60a5fa; ring-color: rgba(59,130,246,0.3);">
+                Step 1: Face ID
+            </div>
+
+            <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-gray-950 border border-gray-700 shadow-inner flex items-center justify-center z-10">
+                <img src="/video_feed" class="w-full h-full object-cover">
+            </div>
+
+            <div id="instruction" class="text-2xl font-bold h-12 flex items-center justify-center text-center transition-colors duration-300 mt-6 z-10" style="color: #60a5fa;">
+                System Ready
+            </div>
+
+            <div id="barWrap" class="w-full mt-2 mb-8 z-10">
+                <div class="h-3 w-full bg-gray-800 rounded-full overflow-hidden ring-1 ring-white/5">
+                    <div id="bar" class="h-full w-0 transition-all duration-300 ease-out" style="background-color: #3b82f6;"></div>
+                </div>
+            </div>
+
+            <button id="btn" onclick="start()" class="z-10 w-full md:w-2/3 px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 glow-blue transform transition-all duration-200 hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none">
+                Initialize Login
+            </button>
         </div>
-        <div class="panel">
-            <h3>Verification Snapshot</h3>
-            <div style="height:375px; background:#000; border-radius:10px; display:flex; align-items:center; justify-content:center;">
-                <img id="snap" src="" style="display:none;">
-                <span id="msg" style="color:#555;">Waiting for biometric data...</span>
+
+        <div class="bg-gray-900/50 backdrop-blur-xl border border-gray-800 rounded-3xl p-8 shadow-2xl flex flex-col relative overflow-hidden">
+             <div class="absolute -bottom-24 -right-24 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl"></div>
+
+            <h3 class="text-xl font-semibold text-gray-300 mb-6 text-center z-10 tracking-wide">Verification Snapshot</h3>
+            
+            <div class="flex-1 w-full bg-gray-950/80 rounded-2xl border-2 border-dashed border-gray-700 flex items-center justify-center overflow-hidden relative min-h-[350px] z-10">
+                <span id="msg" class="text-gray-500 font-medium animate-pulse text-center px-4">Awaiting biometric data...</span>
+                <img id="snap" src="" class="hidden w-full h-full object-contain p-2 rounded-xl">
             </div>
         </div>
     </div>
+
     <script>
         let active = false;
         let currentPhase = "face";
         
+        // Tailwind Palette Hex Codes for JS Manipulation
+        const colors = {
+            blue: "#3b82f6",
+            blueLight: "#60a5fa",
+            red: "#ef4444",
+            orange: "#f97316",
+            orangeLight: "#fb923c",
+            green: "#10b981",
+            greenLight: "#34d399"
+        };
+
+        function setBadge(text, color, lightColor) {
+            const badge = document.getElementById('phaseBadge');
+            badge.innerText = text;
+            badge.style.backgroundColor = `rgba(${hexToRgb(color)}, 0.1)`;
+            badge.style.color = lightColor;
+            badge.style.borderColor = `rgba(${hexToRgb(color)}, 0.3)`;
+        }
+
+        function hexToRgb(hex) {
+            const bigint = parseInt(hex.replace('#', ''), 16);
+            return `${(bigint >> 16) & 255}, ${(bigint >> 8) & 255}, ${bigint & 255}`;
+        }
+
         function start() {
             active = true;
             currentPhase = "face";
-            document.getElementById('btn').innerText = "Scanning...";
-            document.getElementById('btn').disabled = true;
+            const btn = document.getElementById('btn');
+            btn.innerText = "Scanning Environment...";
+            btn.disabled = true;
             document.getElementById('barWrap').style.display = "block";
-            document.getElementById('phaseBadge').innerText = "Step 1: Face ID";
-            document.getElementById('phaseBadge').style.background = "#00d4ff";
+            setBadge("Step 1: Face ID", colors.blue, colors.blueLight);
             loop();
         }
 
@@ -495,19 +544,21 @@ HTML_TEMPLATE = """
             .then(r => r.json())
             .then(d => {
                 if(d.status !== "no_frame") {
-                    document.getElementById('instruction').innerText = d.instruction;
+                    const inst = document.getElementById('instruction');
+                    const bar = document.getElementById('bar');
+                    inst.innerText = d.instruction;
                     
                     // --- FACE PHASE LOGIC ---
                     if (currentPhase === "face") {
                         let p = Math.min(100, (d.ratio / 0.22) * 100);
-                        document.getElementById('bar').style.width = p + "%";
+                        bar.style.width = p + "%";
                         
                         if (d.instruction.includes("Intruder")) {
-                            document.getElementById('instruction').style.color = "#ff4444";
-                            document.getElementById('bar').style.background = "#ff4444";
+                            inst.style.color = colors.red;
+                            bar.style.backgroundColor = colors.red;
                         } else {
-                            document.getElementById('instruction').style.color = "#00d4ff";
-                            document.getElementById('bar').style.background = "#00d4ff";
+                            inst.style.color = colors.blueLight;
+                            bar.style.backgroundColor = colors.blue;
                         }
 
                         if(d.status === "identified") {
@@ -517,9 +568,8 @@ HTML_TEMPLATE = """
                             document.getElementById('msg').style.display = "none";
                             
                             document.getElementById('barWrap').style.display = "none";
-                            document.getElementById('phaseBadge').innerText = "Step 2: Liveness (Gesture)";
-                            document.getElementById('phaseBadge').style.background = "#ff9966";
-                            document.getElementById('instruction').style.color = "#ff9966";
+                            setBadge("Step 2: Liveness (Gesture)", colors.orange, colors.orangeLight);
+                            inst.style.color = colors.orangeLight;
                         }
                     } 
                     
@@ -531,10 +581,12 @@ HTML_TEMPLATE = """
                         
                         if(d.status === "success") {
                             active = false; 
-                            document.getElementById('instruction').style.color = "#00ff88";
-                            document.getElementById('phaseBadge').innerText = "✅ Fully Unlocked";
-                            document.getElementById('phaseBadge').style.background = "#00ff88";
-                            document.getElementById('btn').innerText = "Login Successful";
+                            inst.style.color = colors.greenLight;
+                            setBadge("✅ Fully Unlocked", colors.green, colors.greenLight);
+                            
+                            const btn = document.getElementById('btn');
+                            btn.innerText = "Authentication Successful";
+                            btn.className = "z-10 w-full md:w-2/3 px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-emerald-600 to-emerald-500 glow-green transform transition-all duration-200 disabled:opacity-100 disabled:cursor-default";
                         }
                     }
                     
