@@ -486,7 +486,7 @@ HTML_TEMPLATE = """
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
-<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-start pt-8 px-6 pb-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black relative overflow-hidden">
+<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-start pt-5 px-6 pb-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black relative overflow-hidden">
 
     <div id="startOverlay" class="fixed inset-0 bg-gray-950/95 backdrop-blur-xl z-[100] flex flex-col items-center justify-center">
         <div class="text-center mb-10">
@@ -505,7 +505,7 @@ HTML_TEMPLATE = """
         <p class="text-gray-400 mt-2 text-sm font-medium tracking-widest uppercase">Autonomous Biometrics</p>
     </div>
 
-    <div class="w-full max-w-5xl grid grid-cols-1 md:grid-cols-[1fr_300px] gap-6 z-10">
+    <div class="w-full max-w-4xl grid grid-cols-1 md:grid-cols-[1fr_260px] gap-5 z-10">
         
         <div class="bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 shadow-2xl flex flex-col relative overflow-hidden z-10">
             
@@ -522,8 +522,8 @@ HTML_TEMPLATE = """
                     3. Unlocked
                 </div>
             </div>
-
-            <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-gray-700 shadow-inner flex items-center justify-center z-10 ring-4 ring-black/50 mx-auto">
+            
+            <div id="vContainer" class="relative w-full aspect-[4/3] rounded-2xl overflow-hidden bg-black border border-gray-700 shadow-inner flex items-center justify-center z-10 ring-4 ring-black/50 mx-auto">
                 <img src="/video_feed" class="w-full h-full object-cover">
                 <div class="absolute inset-0 pointer-events-none opacity-30">
                     <div class="absolute top-6 left-6 w-12 h-12 border-t-2 border-l-2 border-white"></div>
@@ -790,7 +790,7 @@ HTML_TEMPLATE = """
             document.getElementById('info-phase').style.color = colors.gray;
             document.getElementById('info-dist').innerText = "--";
 
-            document.getElementById('instruction').innerText = "Awaiting Subject...";
+            document.getElementById('instruction').innerText = "Awaiting Subject... Step into frame.";
             document.getElementById('instruction').style.color = colors.gray;
         }
 
