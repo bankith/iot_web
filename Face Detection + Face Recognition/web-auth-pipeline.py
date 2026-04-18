@@ -28,6 +28,7 @@ shared_frame = None
 last_known_face = None
 last_known_hand = None
 use_fallback = False
+authenticated_name = None  # Remembers who authenticated in Phase 1
 
 app = Flask(__name__)
 
@@ -159,7 +160,7 @@ def build_database_from_folder(datasets_dir: str):
             print(f"  ✓ Enrolled Face: {name}")
 
 # =============================================================================
-# HAND MODELS (TFLite: Palm + Landmark + Gesture)
+# HAND MODELS (TFLite: Palm + Landmark + Gesture + Math Fallback)
 # =============================================================================
 GESTURE_LABELS = ["None", "Closed_Fist", "Open_Palm", "Pointing_Up", "Thumb_Down", "Thumb_Up", "Victory", "ILoveYou"]
 HAND_CONNECTIONS = [(0,1), (1,2), (2,3), (3,4), (0,5), (5,6), (6,7), (7,8), (0,9), (9,10), (10,11), (11,12), (0,13), (13,14), (14,15), (15,16), (0,17), (17,18), (18,19), (19,20), (5,9), (9,13), (13,17)]
@@ -289,14 +290,9 @@ def is_victory_sign(landmarks):
     if landmarks is None or len(landmarks) < 21: return False
     
     fingers_up = 0
-    # Map Tip vs PIP (middle knuckle) for Index, Middle, Ring, Pinky
     for tip, pip in zip([8, 12, 16, 20], [6, 10, 14, 18]):
-        # In OpenCV, Y=0 is the top of the screen. 
-        # So tip[1] < pip[1] means the finger is pointing UP.
         if landmarks[tip][1] < landmarks[pip][1]: 
             fingers_up += 1
-            
-    # It's a victory sign if exactly 2 fingers (Index and Middle) are raised
     return fingers_up == 2
 
 # =============================================================================
@@ -310,11 +306,10 @@ def camera_thread(camera_index):
         ret, frame = cap.read()
         if ret:
             frame = cv2.flip(frame, 1)
-            # Draw Face Box from memory
+            # Draw trackers from memory
             if last_known_face:
-                bx, by, bw, bh = last_known_face
-                cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), (255, 0, 0), 2)
-            # Draw Hand from memory
+                bx, by, bw, bh, color = last_known_face
+                cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), color, 2)
             if last_known_hand:
                 draw_hand_landmarks(frame, last_known_hand['pts'], last_known_hand['gesture'])
             
@@ -338,7 +333,7 @@ def video_feed():
 
 @app.route("/process", methods=["POST"])
 def process_frame():
-    global last_known_face, last_known_hand, use_fallback
+    global last_known_face, last_known_hand, use_fallback, authenticated_name
     req = request.get_json()
     phase = req.get("phase", "face")
 
@@ -350,10 +345,10 @@ def process_frame():
     annotated = frame.copy()
 
     # ---------------------------------------------------------
-    # PHASE 1: FACE DETECTION & RECOGNITION
+    # PHASE 1: INITIAL FACE ID (Strict Distance)
     # ---------------------------------------------------------
     if phase == "face":
-        last_known_hand = None # Clear old hands
+        last_known_hand = None 
         with ai_lock:
             detections = detect_faces(frame[:, :, ::-1], det_sess_g, anchors_g)
 
@@ -364,13 +359,14 @@ def process_frame():
         best_face = max(detections, key=lambda d: d["score"])
         x1, y1, x2, y2 = best_face["bbox"]
         bx, by, bw, bh = int(x1), int(y1), int(x2 - x1), int(y2 - y1)
-        last_known_face = [max(0, bx), max(0, by), bw, bh]
-
+        
         ratio = (bw * bh) / (W * H)
-                
-        if ratio < 0.2:
+        
+        if ratio < 0.20:
+            last_known_face = [max(0, bx), max(0, by), bw, bh, (255, 0, 0)] # Blue box
             return jsonify({"status": "wait", "instruction": "Move Closer", "ratio": ratio})
-        elif ratio > 0.4:
+        elif ratio > 0.60:
+            last_known_face = [max(0, bx), max(0, by), bw, bh, (255, 0, 0)] # Blue box
             return jsonify({"status": "wait", "instruction": "Too Close! Move Back", "ratio": ratio})
         
         # Perfect distance -> Verify Identity
@@ -379,6 +375,8 @@ def process_frame():
             name, similarity = db_g.search(emb, threshold=0.45)
             
         if name:
+            authenticated_name = name # Save identity for Phase 2
+            last_known_face = [max(0, bx), max(0, by), bw, bh, (0, 255, 0)] # Green Box
             cv2.rectangle(annotated, (bx, by), (bx+bw, by+bh), (0, 255, 0), 3)
             _, buffer = cv2.imencode('.jpg', annotated)
             return jsonify({
@@ -389,27 +387,56 @@ def process_frame():
                 "image": base64.b64encode(buffer).decode('utf-8')
             })
         else:
+            last_known_face = [max(0, bx), max(0, by), bw, bh, (0, 0, 255)] # Red Box
             return jsonify({"status": "wait", "instruction": "Intruder Alert! Unknown Face.", "ratio": ratio})
 
     # ---------------------------------------------------------
-    # PHASE 2: HAND GESTURE CONFIRMATION
+    # PHASE 2: CONTINUOUS AUTH + LIVENESS (Farther Distance)
     # ---------------------------------------------------------
     elif phase == "gesture":
-        last_known_face = None # Stop drawing face box
+        face_verified = False
+        
+        # 1. Continuous Face Tracking
+        with ai_lock:
+            detections = detect_faces(frame[:, :, ::-1], det_sess_g, anchors_g)
+            
+        if detections:
+            best_face = max(detections, key=lambda d: d["score"])
+            with ai_lock:
+                emb = get_embedding(best_face["aligned"], cava_sess_g)
+                # Relaxed threshold because they stepped back
+                name, sim = db_g.search(emb, threshold=0.40) 
+                
+            if name == authenticated_name:
+                face_verified = True
+                fx1, fy1, fx2, fy2 = best_face["bbox"]
+                bx, by, bw, bh = int(fx1), int(fy1), int(fx2 - fx1), int(fy2 - fy1)
+                
+                # Yellow tracking box
+                last_known_face = [max(0, bx), max(0, by), bw, bh, (0, 255, 255)]
+                cv2.rectangle(annotated, (max(0, bx), max(0, by)), (bx+bw, by+bh), (0, 255, 255), 2)
+                cv2.putText(annotated, f"Tracking: {name}", (max(0, bx), max(0, by)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+        # Freeze if original face is lost
+        if not face_verified:
+            last_known_hand = None
+            last_known_face = None
+            _, buffer = cv2.imencode('.jpg', annotated)
+            return jsonify({
+                "status": "wait_gesture", 
+                "instruction": f"Face lost! {authenticated_name}, stay in frame.", 
+                "image": base64.b64encode(buffer).decode('utf-8')
+            })
+
+        # 2. Hand Gesture Detection
         with ai_lock:
             boxes = palm_det.detect(frame)
             for box in boxes:
                 lm_res = hand_lm.detect(frame, box)
                 if lm_res:
-                    # --- THE TOGGLE ---
                     if use_fallback:
-                        # Brain 1: Pure Math Geometry
-                        if is_victory_sign(lm_res["frame"]):
-                            gesture = "Victory"
-                        else:
-                            gesture = "None"
+                        gesture = "Victory" if is_victory_sign(lm_res["frame"]) else "None"
                     else:
-                        # Brain 2: TFLite Classifier Model
                         gesture, conf = gesture_cls.classify(lm_res["local"], lm_res["handedness"])
                     
                     last_known_hand = {"pts": lm_res["frame"], "gesture": gesture}
@@ -421,12 +448,11 @@ def process_frame():
                     if gesture == "Victory":
                         return jsonify({"status": "success", "instruction": "Access Granted! ✌️", "image": img_b64})
                     else:
-                        return jsonify({"status": "wait_gesture", "instruction": "Almost done! Show 'Victory' sign.", "image": img_b64})
+                        return jsonify({"status": "wait_gesture", "instruction": "Show 'Victory' sign to confirm.", "image": img_b64})
         
-        # No hands found
         last_known_hand = None
-        return jsonify({"status": "wait_gesture", "instruction": "Show 'Victory' sign to confirm."})
-
+        _, buffer = cv2.imencode('.jpg', annotated)
+        return jsonify({"status": "wait_gesture", "instruction": "Show 'Victory' sign to confirm.", "image": base64.b64encode(buffer).decode('utf-8')})
 
 # =============================================================================
 # HTML / JS UI
@@ -515,7 +541,6 @@ HTML_TEMPLATE = """
         </div>
         
         <div class="grid grid-cols-2 gap-2">
-            
             <div class="flex flex-col">
                 <div class="text-[9px] text-gray-500 text-center uppercase tracking-widest mb-1">1. Face</div>
                 <div class="w-full aspect-[4/3] bg-black rounded-lg border border-gray-800 flex items-center justify-center overflow-hidden relative">
@@ -523,7 +548,6 @@ HTML_TEMPLATE = """
                     <img id="snapFace" src="" class="hidden w-full h-full object-cover">
                 </div>
             </div>
-
             <div class="flex flex-col">
                 <div class="text-[9px] text-gray-500 text-center uppercase tracking-widest mb-1">2. Liveness</div>
                 <div class="w-full aspect-[4/3] bg-black rounded-lg border border-gray-800 flex items-center justify-center overflow-hidden relative">
@@ -531,7 +555,6 @@ HTML_TEMPLATE = """
                     <img id="snapGesture" src="" class="hidden w-full h-full object-cover">
                 </div>
             </div>
-            
         </div>
     </div>
 
@@ -570,15 +593,14 @@ HTML_TEMPLATE = """
             document.getElementById('debugPanel').style.display = 'block'; 
             document.getElementById('barWrap').style.display = "block";
             
-            // Reset readouts
             document.getElementById('info-name').innerText = "--";
             document.getElementById('info-name').style.color = colors.gray;
             document.getElementById('info-gesture').innerText = "Pending";
             document.getElementById('info-gesture').style.color = colors.gray;
             document.getElementById('info-phase').innerText = "Face";
             document.getElementById('info-phase').style.color = colors.blueLight;
+            document.getElementById('info-dist').innerText = "--";
 
-            // Reset images
             document.getElementById('snapFace').style.display = "none";
             document.getElementById('msgFace').style.display = "block";
             document.getElementById('snapGesture').style.display = "none";
@@ -603,9 +625,7 @@ HTML_TEMPLATE = """
                     const bar = document.getElementById('bar');
                     inst.innerText = d.instruction;
                     
-                    // --- FACE PHASE LOGIC ---
                     if (currentPhase === "face") {
-                        // Change 0.60 back to whatever your max zoom limit is in your Python script
                         let p = Math.min(100, (d.ratio / 0.60) * 100); 
                         bar.style.width = p + "%";
                         
@@ -622,7 +642,6 @@ HTML_TEMPLATE = """
                         if(d.status === "identified") {
                             currentPhase = "gesture"; 
                             
-                            // LOCK IN FACE SNAPSHOT
                             document.getElementById('snapFace').src = "data:image/jpeg;base64," + d.image;
                             document.getElementById('snapFace').style.display = "block";
                             document.getElementById('msgFace').style.display = "none";
@@ -637,11 +656,8 @@ HTML_TEMPLATE = """
                             inst.style.color = colors.orangeLight;
                         }
                     } 
-                    
-                    // --- GESTURE PHASE LOGIC ---
                     else if (currentPhase === "gesture") {
                         if (d.image) {
-                            // STREAM GESTURE SNAPSHOT
                             document.getElementById('snapGesture').src = "data:image/jpeg;base64," + d.image;
                             document.getElementById('snapGesture').style.display = "block";
                             document.getElementById('msgGesture').style.display = "none";
@@ -708,7 +724,6 @@ def main():
     palm_det = PalmDetectorTFLite(args.palm)
     hand_lm = HandLandmarkTFLite(args.landmark)
     
-    # Only load gesture AI if we aren't using the fallback math
     if not use_fallback:
         try: 
             gesture_cls = GestureClassifierTFLite(args.gesture)
