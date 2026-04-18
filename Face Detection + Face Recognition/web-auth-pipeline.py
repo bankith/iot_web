@@ -486,7 +486,7 @@ HTML_TEMPLATE = """
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
-<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black relative overflow-hidden">
+<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-start pt-8 px-6 pb-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black relative overflow-hidden">
 
     <div id="startOverlay" class="fixed inset-0 bg-gray-950/95 backdrop-blur-xl z-[100] flex flex-col items-center justify-center">
         <div class="text-center mb-10">
@@ -498,20 +498,38 @@ HTML_TEMPLATE = """
         </button>
     </div>
 
-    <div class="w-full max-w-4xl grid grid-cols-1 md:grid-cols-[1fr_300px] gap-6 z-10">
+    <div class="mb-6 text-center z-10">
+        <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 drop-shadow-lg tracking-widest">
+            iConnection
+        </h1>
+        <p class="text-gray-400 mt-2 text-sm font-medium tracking-widest uppercase">Autonomous Biometrics</p>
+    </div>
+
+    <div class="w-full max-w-5xl grid grid-cols-1 md:grid-cols-[1fr_300px] gap-6 z-10">
         
-        <div class="bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 shadow-2xl flex flex-col relative overflow-hidden">
-            <div id="phaseBadge" class="self-start mb-4 px-5 py-1.5 rounded-full text-xs font-bold tracking-widest uppercase transition-colors duration-300 ring-1" style="background-color: rgba(156,163,175,0.1); color: #9ca3af; ring-color: rgba(156,163,175,0.3);">
-                System Armed
+        <div class="bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 shadow-2xl flex flex-col relative overflow-hidden z-10">
+            
+            <div class="w-full flex items-center justify-between gap-1 md:gap-2 mb-4">
+                <div id="step-face" class="flex-1 py-1.5 rounded-full border text-[9px] md:text-xs font-bold tracking-widest uppercase text-center transition-all duration-300">
+                    1. Face ID
+                </div>
+                <div class="w-2 md:w-4 h-[1px] bg-gray-700"></div>
+                <div id="step-gesture" class="flex-1 py-1.5 rounded-full border text-[9px] md:text-xs font-bold tracking-widest uppercase text-center transition-all duration-300">
+                    2. Liveness
+                </div>
+                <div class="w-2 md:w-4 h-[1px] bg-gray-700"></div>
+                <div id="step-unlock" class="flex-1 py-1.5 rounded-full border text-[9px] md:text-xs font-bold tracking-widest uppercase text-center transition-all duration-300">
+                    3. Unlocked
+                </div>
             </div>
 
-            <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-gray-700 shadow-inner flex items-center justify-center ring-4 ring-black/50">
+            <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-gray-700 shadow-inner flex items-center justify-center z-10 ring-4 ring-black/50 mx-auto">
                 <img src="/video_feed" class="w-full h-full object-cover">
                 <div class="absolute inset-0 pointer-events-none opacity-30">
-                    <div class="absolute top-4 left-4 w-8 h-8 border-t-2 border-l-2 border-white"></div>
-                    <div class="absolute top-4 right-4 w-8 h-8 border-t-2 border-r-2 border-white"></div>
-                    <div class="absolute bottom-4 left-4 w-8 h-8 border-b-2 border-l-2 border-white"></div>
-                    <div class="absolute bottom-4 right-4 w-8 h-8 border-b-2 border-r-2 border-white"></div>
+                    <div class="absolute top-6 left-6 w-12 h-12 border-t-2 border-l-2 border-white"></div>
+                    <div class="absolute top-6 right-6 w-12 h-12 border-t-2 border-r-2 border-white"></div>
+                    <div class="absolute bottom-6 left-6 w-12 h-12 border-b-2 border-l-2 border-white"></div>
+                    <div class="absolute bottom-6 right-6 w-12 h-12 border-b-2 border-r-2 border-white"></div>
                 </div>
             </div>
 
@@ -520,29 +538,29 @@ HTML_TEMPLATE = """
                     <div id="bar" class="h-full w-0 transition-all duration-300 ease-out" style="background-color: #3b82f6;"></div>
                 </div>
             </div>
-
-            <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center">
+            
+            <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center flex flex-col justify-center">
                     <div class="text-[9px] text-gray-500 uppercase tracking-widest mb-1">Identity</div>
-                    <div id="info-name" class="font-mono font-bold text-gray-300">--</div>
+                    <div id="info-name" class="font-mono text-sm font-bold text-gray-300">--</div>
                 </div>
-                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center">
+                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center flex flex-col justify-center">
                     <div class="text-[9px] text-gray-500 uppercase tracking-widest mb-1">Proximity</div>
-                    <div id="info-dist" class="font-mono font-bold text-gray-300">--</div>
+                    <div id="info-dist" class="font-mono text-sm font-bold text-gray-300">--</div>
                 </div>
-                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center">
+                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center flex flex-col justify-center">
                     <div class="text-[9px] text-gray-500 uppercase tracking-widest mb-1">Auth Phase</div>
-                    <div id="info-phase" class="font-mono font-bold text-gray-400">Idle</div>
+                    <div id="info-phase" class="font-mono text-sm font-bold text-gray-400">Idle</div>
                 </div>
-                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center">
+                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center flex flex-col justify-center">
                     <div class="text-[9px] text-gray-500 uppercase tracking-widest mb-1">Liveness</div>
-                    <div id="info-gesture" class="font-mono font-bold text-gray-300">--</div>
+                    <div id="info-gesture" class="font-mono text-sm font-bold text-gray-300">--</div>
                 </div>
             </div>
         </div>
 
-        <div class="bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 shadow-2xl flex flex-col items-center justify-center relative">
-            <h3 class="text-[10px] font-bold text-gray-500 uppercase tracking-widest absolute top-6">AI Assistant Core</h3>
+        <div class="bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 shadow-2xl flex flex-col items-center justify-center relative z-10">
+            <h3 class="text-[10px] font-bold text-gray-500 uppercase tracking-widest absolute top-6">AI Assistant</h3>
             
             <div class="relative w-48 h-48 my-4 flex items-center justify-center">
                 <div id="orb-container" class="absolute inset-0 z-0"></div>
@@ -590,19 +608,13 @@ HTML_TEMPLATE = """
         };
 
         // =========================================================
-        // THREE.JS: MORPHING SIRI ORB SHADER
+        // THREE.JS: MORPHING SIRI ORB SHADER (DARK THEME)
         // =========================================================
         let orbScene, orbCamera, orbRenderer, orbMaterial, orbMesh;
         
-        // Orb Morphing Target States (Now includes scaling and icon states!)
         let targetOrb = {
-            speed: 0.5,
-            intensity: 0.1,
-            scaleZ: 1.0,
-            scaleXY: 1.0,
-            showIcon: false,
-            baseColor: new THREE.Color(0x000a20),
-            glowColor: new THREE.Color(0x3b82f6)
+            speed: 0.5, intensity: 0.1, scaleZ: 1.0, scaleXY: 1.0, showIcon: false,
+            baseColor: new THREE.Color(0x000a20), glowColor: new THREE.Color(0x3b82f6)
         };
 
         function initThreeJSOrb() {
@@ -623,10 +635,8 @@ HTML_TEMPLATE = """
                 uniform float morphSpeed;
                 uniform float morphIntensity;
                 varying vec3 vNormal;
-                
                 void main() {
-                    vNormal = normal;
-                    vec3 p = position;
+                    vNormal = normal; vec3 p = position;
                     float noise = sin(p.x * 4.0 + time * morphSpeed) * cos(p.y * 4.0 + time * morphSpeed * 0.8) * sin(p.z * 4.0 + time * morphSpeed * 1.2);
                     p += normal * noise * morphIntensity;
                     gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
@@ -634,10 +644,7 @@ HTML_TEMPLATE = """
             `;
 
             const fragmentShader = `
-                uniform vec3 baseColor;
-                uniform vec3 glowColor;
-                varying vec3 vNormal;
-                
+                uniform vec3 baseColor; uniform vec3 glowColor; varying vec3 vNormal;
                 void main() {
                     float intensity = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
                     vec3 finalColor = mix(baseColor, glowColor, intensity);
@@ -647,15 +654,10 @@ HTML_TEMPLATE = """
 
             orbMaterial = new THREE.ShaderMaterial({
                 uniforms: {
-                    time: { value: 0.0 },
-                    morphSpeed: { value: 0.5 },
-                    morphIntensity: { value: 0.1 },
-                    baseColor: { value: new THREE.Color(0x000a20) },
-                    glowColor: { value: new THREE.Color(0x3b82f6) }
+                    time: { value: 0.0 }, morphSpeed: { value: 0.5 }, morphIntensity: { value: 0.1 },
+                    baseColor: { value: new THREE.Color(0x000a20) }, glowColor: { value: new THREE.Color(0x3b82f6) }
                 },
-                vertexShader: vertexShader,
-                fragmentShader: fragmentShader,
-                transparent: true
+                vertexShader: vertexShader, fragmentShader: fragmentShader, transparent: true
             });
 
             orbMesh = new THREE.Mesh(geometry, orbMaterial);
@@ -666,31 +668,27 @@ HTML_TEMPLATE = """
 
         function animateOrb() {
             requestAnimationFrame(animateOrb);
-            
             orbMaterial.uniforms.time.value += 0.02;
-            orbMesh.rotation.y += 0.005;
-            orbMesh.rotation.x += 0.002;
+            orbMesh.rotation.y += 0.005; orbMesh.rotation.x += 0.002;
 
-            // Interpolate shader morphing
             orbMaterial.uniforms.morphSpeed.value += (targetOrb.speed - orbMaterial.uniforms.morphSpeed.value) * 0.05;
             orbMaterial.uniforms.morphIntensity.value += (targetOrb.intensity - orbMaterial.uniforms.morphIntensity.value) * 0.05;
             orbMaterial.uniforms.baseColor.value.lerp(targetOrb.baseColor, 0.05);
             orbMaterial.uniforms.glowColor.value.lerp(targetOrb.glowColor, 0.05);
 
-            // Interpolate Mesh Scaling (Creates the flattening disc effect)
             orbMesh.scale.z += (targetOrb.scaleZ - orbMesh.scale.z) * 0.08;
             orbMesh.scale.x += (targetOrb.scaleXY - orbMesh.scale.x) * 0.08;
             orbMesh.scale.y += (targetOrb.scaleXY - orbMesh.scale.y) * 0.08;
 
-            // Handle the Holographic Icon Overlay
+            // Safe icon rendering check
             const icon = document.getElementById('holo-icon');
-            if (targetOrb.showIcon) {
-                icon.style.opacity = 1;
-                icon.style.transform = "scale(1)";
-                icon.style.textShadow = `0 0 30px #${targetOrb.glowColor.getHexString()}`;
-            } else {
-                icon.style.opacity = 0;
-                icon.style.transform = "scale(0.5)";
+            if (icon) {
+                if (targetOrb.showIcon) {
+                    icon.style.opacity = 1; icon.style.transform = "scale(1)";
+                    icon.style.textShadow = `0 0 30px #${targetOrb.glowColor.getHexString()}`;
+                } else {
+                    icon.style.opacity = 0; icon.style.transform = "scale(0.5)";
+                }
             }
 
             orbRenderer.render(orbScene, orbCamera);
@@ -702,7 +700,6 @@ HTML_TEMPLATE = """
             } else if (state === "face") {
                 targetOrb = { speed: 2.0, intensity: 0.15, scaleZ: 1.0, scaleXY: 1.0, showIcon: false, baseColor: new THREE.Color(0x002244), glowColor: new THREE.Color(0x00d4ff) }; 
             } else if (state === "gesture") {
-                // FLATTENS INTO A RADAR DISC AND REVEALS THE ICON!
                 targetOrb = { speed: 3.0, intensity: 0.02, scaleZ: 0.1, scaleXY: 1.3, showIcon: true, baseColor: new THREE.Color(0x331100), glowColor: new THREE.Color(0xf97316) }; 
             } else if (state === "error") {
                 targetOrb = { speed: 6.0, intensity: 0.6, scaleZ: 1.0, scaleXY: 1.0, showIcon: false, baseColor: new THREE.Color(0x330000), glowColor: new THREE.Color(0xef4444) }; 
@@ -719,8 +716,7 @@ HTML_TEMPLATE = """
             if(!audioCtx) return;
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
-            osc.type = type;
-            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            osc.type = type; osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
             gain.gain.setValueAtTime(vol, audioCtx.currentTime);
             gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
             osc.connect(gain); gain.connect(audioCtx.destination);
@@ -728,23 +724,52 @@ HTML_TEMPLATE = """
         }
         function soundWake() { playTone(300, 'sine', 0.2); setTimeout(() => playTone(600, 'sine', 0.3), 150); }
         function soundFaceVerified() { playTone(800, 'square', 0.1, 0.05); setTimeout(() => playTone(1200, 'square', 0.2, 0.05), 100); }
-        function soundUnlocked() { playTone(523.25, 'sine', 0.5, 0.1); playTone(659.25, 'sine', 0.5, 0.1); setTimeout(() => playTone(1046.50, 'sine', 0.7, 0.1), 150); }
+        function soundUnlocked() { 
+            playTone(523.25, 'sine', 0.5, 0.1); playTone(659.25, 'sine', 0.5, 0.1); 
+            setTimeout(() => playTone(1046.50, 'sine', 0.7, 0.1), 150); 
+        }
         function soundError() { playTone(150, 'sawtooth', 0.3, 0.1); }
 
         // =========================================================
-        // KIOSK LOGIC
+        // KIOSK LOGIC & STEPPER
         // =========================================================
-        function setBadge(text, color, lightColor) {
-            const badge = document.getElementById('phaseBadge');
-            badge.innerText = text;
-            badge.style.backgroundColor = `rgba(${hexToRgb(color)}, 0.1)`;
-            badge.style.color = lightColor;
-            badge.style.borderColor = `rgba(${hexToRgb(color)}, 0.3)`;
-        }
+        function setStepper(phase) {
+            const sFace = document.getElementById('step-face');
+            const sGest = document.getElementById('step-gesture');
+            const sUnlk = document.getElementById('step-unlock');
 
-        function hexToRgb(hex) {
-            const bigint = parseInt(hex.replace('#', ''), 16);
-            return `${(bigint >> 16) & 255}, ${(bigint >> 8) & 255}, ${bigint & 255}`;
+            [sFace, sGest, sUnlk].forEach(el => {
+                el.style.backgroundColor = "rgba(156,163,175,0.05)";
+                el.style.borderColor = "rgba(156,163,175,0.2)";
+                el.style.color = "#6b7280";
+                el.style.opacity = "0.4";
+            });
+
+            if (phase === "idle") {
+                // Keep dimmed
+            } else if (phase === "face") {
+                sFace.style.backgroundColor = "rgba(59,130,246,0.1)";
+                sFace.style.borderColor = "rgba(59,130,246,0.3)";
+                sFace.style.color = "#60a5fa";
+                sFace.style.opacity = "1";
+            } else if (phase === "gesture") {
+                sFace.style.backgroundColor = "rgba(16,185,129,0.1)";
+                sFace.style.borderColor = "rgba(16,185,129,0.3)";
+                sFace.style.color = "#34d399";
+                sFace.style.opacity = "1";
+                
+                sGest.style.backgroundColor = "rgba(249,115,22,0.1)";
+                sGest.style.borderColor = "rgba(249,115,22,0.3)";
+                sGest.style.color = "#fb923c";
+                sGest.style.opacity = "1";
+            } else if (phase === "success") {
+                [sFace, sGest, sUnlk].forEach(el => {
+                    el.style.backgroundColor = "rgba(16,185,129,0.1)";
+                    el.style.borderColor = "rgba(16,185,129,0.3)";
+                    el.style.color = "#34d399";
+                    el.style.opacity = "1";
+                });
+            }
         }
 
         function resetToIdle() {
@@ -752,6 +777,7 @@ HTML_TEMPLATE = """
             missedFrames = 0;
             
             setOrbState("idle"); 
+            setStepper("idle");
             
             document.getElementById('debugPanel').style.display = 'none'; 
             document.getElementById('barWrap').style.display = "none";
@@ -766,12 +792,11 @@ HTML_TEMPLATE = """
 
             document.getElementById('instruction').innerText = "Awaiting Subject...";
             document.getElementById('instruction').style.color = colors.gray;
-
-            setBadge("System Armed", colors.gray, colors.gray);
         }
 
         function setupFaceUI() {
             setOrbState("face"); 
+            setStepper("face");
             
             document.getElementById('debugPanel').style.display = 'block'; 
             document.getElementById('barWrap').style.display = "block";
@@ -784,8 +809,6 @@ HTML_TEMPLATE = """
             document.getElementById('info-phase').innerText = "Face ID";
             document.getElementById('info-phase').style.color = colors.blueLight;
             document.getElementById('info-gesture').innerText = "Pending";
-
-            setBadge("Step 1: Face ID", colors.blue, colors.blueLight);
         }
 
         function autonomousLoop() {
@@ -838,6 +861,7 @@ HTML_TEMPLATE = """
                             if(d.status === "identified") {
                                 soundFaceVerified(); 
                                 setOrbState("gesture"); 
+                                setStepper("gesture"); 
                                 currentState = "gesture"; 
                                 
                                 if (d.image) {
@@ -852,7 +876,6 @@ HTML_TEMPLATE = """
                                 document.getElementById('info-phase').style.color = colors.orangeLight;
                                 
                                 document.getElementById('barWrap').style.display = "none";
-                                setBadge("Step 2: Liveness", colors.orange, colors.orangeLight);
                                 inst.style.color = colors.orangeLight;
                             }
                         }
@@ -869,6 +892,7 @@ HTML_TEMPLATE = """
                             if(d.status === "success") {
                                 soundUnlocked(); 
                                 setOrbState("success"); 
+                                setStepper("success"); 
                                 currentState = "success"; 
                                 
                                 if (d.image) {
@@ -878,7 +902,6 @@ HTML_TEMPLATE = """
                                 }
                                 
                                 inst.style.color = colors.greenLight;
-                                setBadge("✅ Fully Unlocked", colors.green, colors.greenLight);
                                 
                                 document.getElementById('info-gesture').innerText = "Victory ✌️";
                                 document.getElementById('info-gesture').style.color = colors.greenLight;
