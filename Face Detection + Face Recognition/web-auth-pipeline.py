@@ -293,20 +293,14 @@ def is_victory_sign(landmarks):
             fingers_up += 1
     return fingers_up == 2
 
-# NEW: Sci-Fi "Corner Bracket" Square Annotation function
 def draw_target_box(img, x, y, w, h, color, thickness=3):
-    l = int(min(w, h) * 0.2) # Line length is 20% of the box size
-    
-    # Top Left
+    l = int(min(w, h) * 0.2) 
     cv2.line(img, (x, y), (x+l, y), color, thickness)
     cv2.line(img, (x, y), (x, y+l), color, thickness)
-    # Top Right
     cv2.line(img, (x+w, y), (x+w-l, y), color, thickness)
     cv2.line(img, (x+w, y), (x+w, y+l), color, thickness)
-    # Bottom Left
     cv2.line(img, (x, y+h), (x+l, y+h), color, thickness)
     cv2.line(img, (x, y+h), (x, y+h-l), color, thickness)
-    # Bottom Right
     cv2.line(img, (x+w, y+h), (x+w-l, y+h), color, thickness)
     cv2.line(img, (x+w, y+h), (x+w, y+h-l), color, thickness)
 
@@ -315,19 +309,16 @@ def draw_target_box(img, x, y, w, h, color, thickness=3):
 # =============================================================================
 
 def camera_thread(camera_index):
-    global shared_frame, last_known_face, last_known_hand
+    global shared_frame
     cap = cv2.VideoCapture(camera_index)
     while True:
         ret, frame = cap.read()
         if ret:
-            # 1. Flip it so it acts like a mirror
-            frame = cv2.flip(frame, 1)
-            
-            # 2. Save the clean frame for the web UI
+            frame = cv2.flip(frame, 1) # Mirror
+            # Main camera feed remains completely clean. No drawings here!
             with shared_frame_lock:
                 shared_frame = frame.copy()
-        else: 
-            time.sleep(0.01)
+        else: time.sleep(0.01)
 
 @app.route("/")
 def index(): return render_template_string(HTML_TEMPLATE)
@@ -345,9 +336,9 @@ def video_feed():
 
 @app.route("/process", methods=["POST"])
 def process_frame():
-    global last_known_face, last_known_hand, use_fallback, authenticated_name
+    global use_fallback, authenticated_name
     req = request.get_json()
-    phase = req.get("phase", "face")
+    phase = req.get("phase", "idle")
 
     with shared_frame_lock:
         if shared_frame is None: return jsonify({"status": "no_frame"})
@@ -357,9 +348,10 @@ def process_frame():
     annotated = frame.copy()
 
     # ---------------------------------------------------------
-    # PHASE 0: IDLE TRACKING (Before hitting Login)
+    # PHASE 0: IDLE KIOSK SCANNING
     # ---------------------------------------------------------
     if phase == "idle":
+        authenticated_name = None # CRITICAL: Flush memory on reset!
         with ai_lock:
             detections = detect_faces(frame[:, :, ::-1], det_sess_g, anchors_g)
         
@@ -367,38 +359,40 @@ def process_frame():
             best_face = max(detections, key=lambda d: d["score"])
             fx1, fy1, fx2, fy2 = best_face["bbox"]
             bx, by, bw, bh = int(fx1), int(fy1), int(fx2 - fx1), int(fy2 - fy1)
+            ratio = (bw * bh) / (W * H)
             
-            # Uses a cool Cyan color for idle tracking
-            last_known_face = [max(0, bx), max(0, by), bw, bh, (255, 200, 50)] 
+            # Draw idle box for the snapshot (cyan)
+            draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (255, 200, 50), thickness=3)
+            _, buffer = cv2.imencode('.jpg', annotated)
+            
+            return jsonify({"status": "face_found", "ratio": ratio, "image": base64.b64encode(buffer).decode('utf-8')})
         else:
-            last_known_face = None
-            
-        return jsonify({"status": "idle"})
+            return jsonify({"status": "idle"})
 
     # ---------------------------------------------------------
     # PHASE 1: INITIAL FACE ID (Strict Distance)
     # ---------------------------------------------------------
     elif phase == "face":
-        last_known_hand = None 
         with ai_lock:
             detections = detect_faces(frame[:, :, ::-1], det_sess_g, anchors_g)
 
         if not detections:
-            last_known_face = None
             return jsonify({"status": "wait", "instruction": "Searching for Face...", "ratio": 0})
 
         best_face = max(detections, key=lambda d: d["score"])
         x1, y1, x2, y2 = best_face["bbox"]
         bx, by, bw, bh = int(x1), int(y1), int(x2 - x1), int(y2 - y1)
-        
         ratio = (bw * bh) / (W * H)
         
         if ratio < 0.20:
-            last_known_face = [max(0, bx), max(0, by), bw, bh, (255, 0, 0)] # Blue box
-            return jsonify({"status": "wait", "instruction": "Move Closer", "ratio": ratio})
+            draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (255, 0, 0), thickness=3)
+            _, buffer = cv2.imencode('.jpg', annotated)
+            return jsonify({"status": "wait", "instruction": "Move Closer", "ratio": ratio, "image": base64.b64encode(buffer).decode('utf-8')})
+            
         elif ratio > 0.60:
-            last_known_face = [max(0, bx), max(0, by), bw, bh, (255, 0, 0)] # Blue box
-            return jsonify({"status": "wait", "instruction": "Too Close! Move Back", "ratio": ratio})
+            draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (255, 0, 0), thickness=3)
+            _, buffer = cv2.imencode('.jpg', annotated)
+            return jsonify({"status": "wait", "instruction": "Too Close! Move Back", "ratio": ratio, "image": base64.b64encode(buffer).decode('utf-8')})
         
         # Perfect distance -> Verify Identity
         with ai_lock:
@@ -407,8 +401,7 @@ def process_frame():
             
         if name:
             authenticated_name = name # Save identity for Phase 2
-            last_known_face = [max(0, bx), max(0, by), bw, bh, (0, 255, 0)] # Green Box
-            draw_target_box(annotated, bx, by, bw, bh, (0, 255, 0), thickness=3)
+            draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (0, 255, 0), thickness=3)
             _, buffer = cv2.imencode('.jpg', annotated)
             return jsonify({
                 "status": "identified", 
@@ -418,8 +411,9 @@ def process_frame():
                 "image": base64.b64encode(buffer).decode('utf-8')
             })
         else:
-            last_known_face = [max(0, bx), max(0, by), bw, bh, (0, 0, 255)] # Red Box
-            return jsonify({"status": "wait", "instruction": "Intruder Alert! Unknown Face.", "ratio": ratio})
+            draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (0, 0, 255), thickness=3)
+            _, buffer = cv2.imencode('.jpg', annotated)
+            return jsonify({"status": "wait", "instruction": "Intruder Alert! Unknown Face.", "ratio": ratio, "image": base64.b64encode(buffer).decode('utf-8')})
 
     # ---------------------------------------------------------
     # PHASE 2: CONTINUOUS AUTH + LIVENESS (Farther Distance)
@@ -435,7 +429,6 @@ def process_frame():
             best_face = max(detections, key=lambda d: d["score"])
             with ai_lock:
                 emb = get_embedding(best_face["aligned"], cava_sess_g)
-                # Relaxed threshold because they stepped back
                 name, sim = db_g.search(emb, threshold=0.40) 
                 
             if name == authenticated_name:
@@ -443,15 +436,10 @@ def process_frame():
                 fx1, fy1, fx2, fy2 = best_face["bbox"]
                 bx, by, bw, bh = int(fx1), int(fy1), int(fx2 - fx1), int(fy2 - fy1)
                 
-                # Yellow tracking box
-                last_known_face = [max(0, bx), max(0, by), bw, bh, (0, 255, 255)]
                 draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (0, 255, 255), thickness=3)
                 cv2.putText(annotated, f"Tracking: {name}", (max(0, bx), max(0, by)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        # Freeze if original face is lost
         if not face_verified:
-            last_known_hand = None
-            last_known_face = None
             _, buffer = cv2.imencode('.jpg', annotated)
             return jsonify({
                 "status": "wait_gesture", 
@@ -470,9 +458,7 @@ def process_frame():
                     else:
                         gesture, conf = gesture_cls.classify(lm_res["local"], lm_res["handedness"])
                     
-                    last_known_hand = {"pts": lm_res["frame"], "gesture": gesture}
                     draw_hand_landmarks(annotated, lm_res["frame"], gesture)
-                    
                     _, buffer = cv2.imencode('.jpg', annotated)
                     img_b64 = base64.b64encode(buffer).decode('utf-8')
 
@@ -481,12 +467,11 @@ def process_frame():
                     else:
                         return jsonify({"status": "wait_gesture", "instruction": "Show 'Victory' sign to confirm.", "image": img_b64})
         
-        last_known_hand = None
         _, buffer = cv2.imencode('.jpg', annotated)
         return jsonify({"status": "wait_gesture", "instruction": "Show 'Victory' sign to confirm.", "image": base64.b64encode(buffer).decode('utf-8')})
 
 # =============================================================================
-# HTML / JS UI
+# HTML / JS UI (Autonomous Kiosk Mode + Sounds)
 # =============================================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -499,17 +484,29 @@ HTML_TEMPLATE = """
     <style>
         .glow-blue { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
         .glow-green { box-shadow: 0 0 20px rgba(16, 185, 129, 0.3); }
+        .glow-gray { box-shadow: 0 0 20px rgba(156, 163, 175, 0.2); }
         .fade-in { animation: fadeIn 0.5s ease-in forwards; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black relative">
 
+    <div id="startOverlay" class="fixed inset-0 bg-gray-950/95 backdrop-blur-xl z-[100] flex flex-col items-center justify-center">
+        <div class="text-center mb-10">
+            <h1 class="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-gray-300 to-gray-500 mb-2">System Offline</h1>
+            <p class="text-gray-500 tracking-widest uppercase text-sm">Awaiting manual initialization</p>
+        </div>
+        
+        <button onclick="initSystem()" class="px-12 py-5 rounded-2xl font-bold text-white text-xl bg-gradient-to-r from-blue-600 to-emerald-500 hover:from-blue-500 hover:to-emerald-400 glow-blue transform transition-all duration-200 hover:-translate-y-1 active:translate-y-0 shadow-2xl tracking-widest uppercase ring-2 ring-white/20">
+            Start Program
+        </button>
+    </div>
+
     <div class="mb-8 text-center z-10">
         <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
             Secure Terminal
         </h1>
-        <p class="text-gray-400 mt-2 text-sm font-medium tracking-widest uppercase">Multi-Factor Biometrics</p>
+        <p class="text-gray-400 mt-2 text-sm font-medium tracking-widest uppercase">Autonomous Biometrics</p>
     </div>
 
     <div class="w-full max-w-3xl bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 md:p-8 shadow-2xl flex flex-col items-center relative overflow-hidden z-10">
@@ -517,8 +514,8 @@ HTML_TEMPLATE = """
         <div class="absolute -top-32 -left-32 w-64 h-64 bg-blue-500/10 rounded-full blur-3xl"></div>
         <div class="absolute -bottom-32 -right-32 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl"></div>
         
-        <div id="phaseBadge" class="relative z-10 mb-5 px-5 py-1.5 rounded-full text-xs font-bold tracking-widest uppercase transition-colors duration-300 ring-1" style="background-color: rgba(59,130,246,0.1); color: #60a5fa; ring-color: rgba(59,130,246,0.3);">
-            Step 1: Face ID
+        <div id="phaseBadge" class="relative z-10 mb-5 px-5 py-1.5 rounded-full text-xs font-bold tracking-widest uppercase transition-colors duration-300 ring-1" style="background-color: rgba(156,163,175,0.1); color: #9ca3af; ring-color: rgba(156,163,175,0.3);">
+            System Armed
         </div>
 
         <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-gray-700 shadow-inner flex items-center justify-center z-10 ring-4 ring-black/50">
@@ -531,17 +528,17 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <div id="instruction" class="text-2xl font-bold h-10 flex items-center justify-center text-center transition-colors duration-300 mt-6 z-10" style="color: #60a5fa;">
-            System Ready
+        <div id="instruction" class="text-2xl font-bold h-10 flex items-center justify-center text-center transition-colors duration-300 mt-6 z-10" style="color: #9ca3af;">
+            Awaiting Subject... Step into frame.
         </div>
 
-        <div id="barWrap" class="w-full mt-2 mb-6 z-10">
+        <div id="barWrap" class="w-full mt-2 mb-6 z-10 hidden">
             <div class="h-2 w-full bg-gray-800 rounded-full overflow-hidden ring-1 ring-white/5">
                 <div id="bar" class="h-full w-0 transition-all duration-300 ease-out" style="background-color: #3b82f6;"></div>
             </div>
         </div>
 
-        <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-3 mb-6 z-10">
+        <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-3 mb-6 z-10 mt-2">
             <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
                 <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Identity</div>
                 <div id="info-name" class="font-mono font-bold text-gray-300">--</div>
@@ -552,17 +549,17 @@ HTML_TEMPLATE = """
             </div>
             <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
                 <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Auth Phase</div>
-                <div id="info-phase" class="font-mono font-bold text-blue-400">Face</div>
+                <div id="info-phase" class="font-mono font-bold text-gray-400">Idle</div>
             </div>
             <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
                 <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Liveness</div>
-                <div id="info-gesture" class="font-mono font-bold text-gray-300">Pending</div>
+                <div id="info-gesture" class="font-mono font-bold text-gray-300">--</div>
             </div>
         </div>
 
-        <button id="btn" onclick="start()" class="z-10 w-full px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 glow-blue transform transition-all duration-200 hover:-translate-y-1 active:translate-y-0 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none disabled:shadow-none">
-            Initialize Login
-        </button>
+        <div id="statusBanner" class="z-10 w-full px-8 py-4 rounded-xl font-bold text-gray-300 text-lg bg-gray-800 border border-gray-700 glow-gray text-center transition-all duration-300">
+            System Armed - Background Scanning Active
+        </div>
     </div>
 
     <div id="debugPanel" class="fixed bottom-6 right-6 w-[22rem] bg-gray-900/90 backdrop-blur-md border border-gray-700 rounded-2xl p-3 shadow-2xl z-50 hidden fade-in">
@@ -590,8 +587,9 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        let active = false;
-        let currentPhase = "face";
+        let currentState = "idle";
+        let missedFrames = 0;
+        let hasPlayedError = false;
         
         const colors = {
             blue: "#3b82f6", blueLight: "#60a5fa",
@@ -601,16 +599,42 @@ HTML_TEMPLATE = """
             gray: "#9ca3af"
         };
 
-        // NEW: Background idle polling loop!
-        setInterval(() => {
-            if(!active) {
-                fetch('/process', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ phase: "idle" })
-                }).catch(() => {});
-            }
-        }, 300);
+        // --- WEB AUDIO API (Generates Sci-Fi Sounds) ---
+        let audioCtx;
+        
+        function playTone(freq, type, duration, vol=0.1) {
+            if(!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        function soundWake() {
+            playTone(300, 'sine', 0.2);
+            setTimeout(() => playTone(600, 'sine', 0.3), 150);
+        }
+
+        function soundFaceVerified() {
+            playTone(800, 'square', 0.1, 0.05);
+            setTimeout(() => playTone(1200, 'square', 0.2, 0.05), 100);
+        }
+
+        function soundUnlocked() {
+            playTone(523.25, 'sine', 0.5, 0.1); // C5
+            playTone(659.25, 'sine', 0.5, 0.1); // E5
+            setTimeout(() => playTone(1046.50, 'sine', 0.7, 0.1), 150); // C6
+        }
+
+        function soundError() {
+            playTone(150, 'sawtooth', 0.3, 0.1);
+        }
 
         function setBadge(text, color, lightColor) {
             const badge = document.getElementById('phaseBadge');
@@ -625,113 +649,174 @@ HTML_TEMPLATE = """
             return `${(bigint >> 16) & 255}, ${(bigint >> 8) & 255}, ${bigint & 255}`;
         }
 
-        function start() {
-            active = true;
-            currentPhase = "face";
-            const btn = document.getElementById('btn');
-            btn.innerText = "Scanning Environment...";
-            btn.disabled = true;
+        function resetToIdle() {
+            currentState = "idle";
+            missedFrames = 0;
             
-            document.getElementById('debugPanel').style.display = 'block'; 
-            document.getElementById('barWrap').style.display = "block";
+            document.getElementById('debugPanel').style.display = 'none'; 
+            document.getElementById('barWrap').style.display = "none";
             
             document.getElementById('info-name').innerText = "--";
             document.getElementById('info-name').style.color = colors.gray;
-            document.getElementById('info-gesture').innerText = "Pending";
+            document.getElementById('info-gesture').innerText = "--";
             document.getElementById('info-gesture').style.color = colors.gray;
-            document.getElementById('info-phase').innerText = "Face";
-            document.getElementById('info-phase').style.color = colors.blueLight;
+            document.getElementById('info-phase').innerText = "Idle";
+            document.getElementById('info-phase').style.color = colors.gray;
             document.getElementById('info-dist').innerText = "--";
 
+            document.getElementById('instruction').innerText = "Awaiting Subject... Step into frame.";
+            document.getElementById('instruction').style.color = colors.gray;
+
+            const banner = document.getElementById('statusBanner');
+            banner.innerText = "System Armed - Background Scanning Active";
+            banner.className = "z-10 w-full px-8 py-4 rounded-xl font-bold text-gray-300 text-lg bg-gray-800 border border-gray-700 glow-gray text-center transition-all duration-300";
+
+            setBadge("System Armed", colors.gray, colors.gray);
+        }
+
+        function setupFaceUI() {
+            document.getElementById('debugPanel').style.display = 'block'; 
+            document.getElementById('barWrap').style.display = "block";
+            
             document.getElementById('snapFace').style.display = "none";
             document.getElementById('msgFace').style.display = "block";
             document.getElementById('snapGesture').style.display = "none";
             document.getElementById('msgGesture').style.display = "block";
 
+            document.getElementById('info-phase').innerText = "Face ID";
+            document.getElementById('info-phase').style.color = colors.blueLight;
+            document.getElementById('info-gesture').innerText = "Pending";
+
+            const banner = document.getElementById('statusBanner');
+            banner.innerText = "Authenticating Identity...";
+            banner.className = "z-10 w-full px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-blue-600 to-blue-500 glow-blue text-center transition-all duration-300";
+
             setBadge("Step 1: Face ID", colors.blue, colors.blueLight);
-            loop();
         }
 
-        function loop() {
-            if(!active) return;
-            
+        function autonomousLoop() {
+            if (currentState === "success") return; 
+
             fetch('/process', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phase: currentPhase })
+                body: JSON.stringify({ phase: currentState })
             })
             .then(r => r.json())
             .then(d => {
                 if(d.status !== "no_frame") {
                     const inst = document.getElementById('instruction');
                     const bar = document.getElementById('bar');
-                    inst.innerText = d.instruction;
                     
-                    if (currentPhase === "face") {
-                        let p = Math.min(100, (d.ratio / 0.60) * 100); 
-                        bar.style.width = p + "%";
-                        
-                        document.getElementById('info-dist').innerText = (d.ratio > 0 ? p.toFixed(0) + "%" : "--");
-                        
-                        if (d.instruction.includes("Intruder")) {
-                            inst.style.color = colors.red;
-                            bar.style.backgroundColor = colors.red;
-                        } else {
-                            inst.style.color = colors.blueLight;
-                            bar.style.backgroundColor = colors.blue;
-                        }
-
-                        if(d.status === "identified") {
-                            currentPhase = "gesture"; 
-                            
-                            document.getElementById('snapFace').src = "data:image/jpeg;base64," + d.image;
-                            document.getElementById('snapFace').style.display = "block";
-                            document.getElementById('msgFace').style.display = "none";
-                            
-                            document.getElementById('info-name').innerText = d.name;
-                            document.getElementById('info-name').style.color = colors.greenLight;
-                            document.getElementById('info-phase').innerText = "Liveness";
-                            document.getElementById('info-phase').style.color = colors.orangeLight;
-                            
-                            document.getElementById('barWrap').style.display = "none";
-                            setBadge("Step 2: Liveness", colors.orange, colors.orangeLight);
-                            inst.style.color = colors.orangeLight;
-                        }
-                    } 
-                    // --- GESTURE PHASE LOGIC ---
-                    else if (currentPhase === "gesture") {
-                        
-                        // We removed the continuous image update from here!
-                        // The UI will now wait patiently.
-                        
-                        if(d.status === "success") {
-                            active = false; 
-                            
-                            // LOCK IN THE GESTURE SNAPSHOT ONLY ON SUCCESS!
-                            if (d.image) {
-                                document.getElementById('snapGesture').src = "data:image/jpeg;base64," + d.image;
-                                document.getElementById('snapGesture').style.display = "block";
-                                document.getElementById('msgGesture').style.display = "none";
-                            }
-                            
-                            inst.style.color = colors.greenLight;
-                            setBadge("✅ Fully Unlocked", colors.green, colors.greenLight);
-                            
-                            document.getElementById('info-gesture').innerText = "Victory ✌️";
-                            document.getElementById('info-gesture').style.color = colors.greenLight;
-                            document.getElementById('info-phase').innerText = "Unlocked";
-                            document.getElementById('info-phase').style.color = colors.greenLight;
-                            
-                            const btn = document.getElementById('btn');
-                            btn.innerText = "Authentication Successful";
-                            btn.className = "z-10 w-full px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-emerald-600 to-emerald-500 glow-green transform transition-all duration-200 disabled:opacity-100 disabled:cursor-default";
+                    // --- IDLE PHASE ---
+                    if (currentState === "idle") {
+                        if (d.status === "face_found") {
+                            soundWake();
+                            hasPlayedError = false; 
+                            currentState = "face";
+                            missedFrames = 0;
+                            setupFaceUI();
                         }
                     }
                     
-                    if (active) setTimeout(loop, 500);
+                    // --- FACE PHASE ---
+                    else if (currentState === "face") {
+                        if (d.status === "wait" && d.ratio === 0) {
+                            missedFrames++;
+                            if (missedFrames > 5) resetToIdle(); 
+                        } else {
+                            missedFrames = 0;
+                            inst.innerText = d.instruction;
+                            
+                            let p = Math.min(100, (d.ratio / 0.60) * 100); 
+                            bar.style.width = p + "%";
+                            document.getElementById('info-dist').innerText = (d.ratio > 0 ? p.toFixed(0) + "%" : "--");
+                            
+                            if (d.instruction.includes("Intruder")) {
+                                inst.style.color = colors.red;
+                                bar.style.backgroundColor = colors.red;
+                                if (!hasPlayedError) {
+                                    soundError(); 
+                                    hasPlayedError = true; 
+                                }
+                            } else {
+                                inst.style.color = colors.blueLight;
+                                bar.style.backgroundColor = colors.blue;
+                            }
+
+                            if(d.status === "identified") {
+                                soundFaceVerified(); 
+                                currentState = "gesture"; 
+                                
+                                if (d.image) {
+                                    document.getElementById('snapFace').src = "data:image/jpeg;base64," + d.image;
+                                    document.getElementById('snapFace').style.display = "block";
+                                    document.getElementById('msgFace').style.display = "none";
+                                }
+                                
+                                document.getElementById('info-name').innerText = d.name;
+                                document.getElementById('info-name').style.color = colors.greenLight;
+                                document.getElementById('info-phase').innerText = "Liveness";
+                                document.getElementById('info-phase').style.color = colors.orangeLight;
+                                
+                                document.getElementById('barWrap').style.display = "none";
+                                setBadge("Step 2: Liveness", colors.orange, colors.orangeLight);
+                                inst.style.color = colors.orangeLight;
+                            }
+                        }
+                    } 
+                    
+                    // --- GESTURE PHASE ---
+                    else if (currentState === "gesture") {
+                        if (d.status === "wait_gesture" && d.instruction.includes("Face lost")) {
+                            missedFrames++;
+                            if (missedFrames > 5) resetToIdle(); 
+                        } else {
+                            missedFrames = 0;
+                            inst.innerText = d.instruction;
+                            
+                            if(d.status === "success") {
+                                soundUnlocked(); 
+                                currentState = "success"; 
+                                
+                                if (d.image) {
+                                    document.getElementById('snapGesture').src = "data:image/jpeg;base64," + d.image;
+                                    document.getElementById('snapGesture').style.display = "block";
+                                    document.getElementById('msgGesture').style.display = "none";
+                                }
+                                
+                                inst.style.color = colors.greenLight;
+                                setBadge("✅ Fully Unlocked", colors.green, colors.greenLight);
+                                
+                                document.getElementById('info-gesture').innerText = "Victory ✌️";
+                                document.getElementById('info-gesture').style.color = colors.greenLight;
+                                document.getElementById('info-phase').innerText = "Unlocked";
+                                document.getElementById('info-phase').style.color = colors.greenLight;
+                                
+                                const banner = document.getElementById('statusBanner');
+                                banner.innerText = "Authentication Successful - Access Granted";
+                                banner.className = "z-10 w-full px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-emerald-600 to-emerald-500 glow-green text-center transition-all duration-300";
+                                
+                                setTimeout(() => {
+                                    resetToIdle();
+                                    autonomousLoop(); 
+                                }, 4000);
+                            }
+                        }
+                    }
+                    
+                    if (currentState !== "success") setTimeout(autonomousLoop, 400);
                 }
             })
-            .catch(() => { if(active) setTimeout(loop, 1000); });
+            .catch(() => { if (currentState !== "success") setTimeout(autonomousLoop, 1000); });
+        }
+
+        // TRIGGERED BY THE START BUTTON ON THE OVERLAY
+        function initSystem() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            document.getElementById('startOverlay').style.display = 'none';
+            resetToIdle();
+            autonomousLoop();
         }
     </script>
 </body>
