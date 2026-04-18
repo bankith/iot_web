@@ -315,7 +315,6 @@ def camera_thread(camera_index):
         ret, frame = cap.read()
         if ret:
             frame = cv2.flip(frame, 1) # Mirror
-            # Main camera feed remains completely clean. No drawings here!
             with shared_frame_lock:
                 shared_frame = frame.copy()
         else: time.sleep(0.01)
@@ -351,7 +350,7 @@ def process_frame():
     # PHASE 0: IDLE KIOSK SCANNING
     # ---------------------------------------------------------
     if phase == "idle":
-        authenticated_name = None # CRITICAL: Flush memory on reset!
+        authenticated_name = None 
         with ai_lock:
             detections = detect_faces(frame[:, :, ::-1], det_sess_g, anchors_g)
         
@@ -361,7 +360,6 @@ def process_frame():
             bx, by, bw, bh = int(fx1), int(fy1), int(fx2 - fx1), int(fy2 - fy1)
             ratio = (bw * bh) / (W * H)
             
-            # Draw idle box for the snapshot (cyan)
             draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (255, 200, 50), thickness=3)
             _, buffer = cv2.imencode('.jpg', annotated)
             
@@ -400,7 +398,7 @@ def process_frame():
             name, similarity = db_g.search(emb, threshold=0.45)
             
         if name:
-            authenticated_name = name # Save identity for Phase 2
+            authenticated_name = name 
             draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (0, 255, 0), thickness=3)
             _, buffer = cv2.imencode('.jpg', annotated)
             return jsonify({
@@ -421,7 +419,6 @@ def process_frame():
     elif phase == "gesture":
         face_verified = False
         
-        # 1. Continuous Face Tracking
         with ai_lock:
             detections = detect_faces(frame[:, :, ::-1], det_sess_g, anchors_g)
             
@@ -447,7 +444,6 @@ def process_frame():
                 "image": base64.b64encode(buffer).decode('utf-8')
             })
 
-        # 2. Hand Gesture Detection
         with ai_lock:
             boxes = palm_det.detect(frame)
             for box in boxes:
@@ -471,7 +467,7 @@ def process_frame():
         return jsonify({"status": "wait_gesture", "instruction": "Show 'Victory' sign to confirm.", "image": base64.b64encode(buffer).decode('utf-8')})
 
 # =============================================================================
-# HTML / JS UI (Autonomous Kiosk Mode + Sounds)
+# HTML / JS UI (Three.js Hologram + Sounds + Kiosk)
 # =============================================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -481,6 +477,7 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Multi-Factor Face & Gesture ID</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <style>
         .glow-blue { box-shadow: 0 0 20px rgba(59, 130, 246, 0.3); }
         .glow-green { box-shadow: 0 0 20px rgba(16, 185, 129, 0.3); }
@@ -489,76 +486,72 @@ HTML_TEMPLATE = """
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
-<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black relative">
+<body class="bg-gray-950 text-gray-100 font-sans min-h-screen flex flex-col items-center justify-center p-6 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-gray-900 via-gray-950 to-black relative overflow-hidden">
 
     <div id="startOverlay" class="fixed inset-0 bg-gray-950/95 backdrop-blur-xl z-[100] flex flex-col items-center justify-center">
         <div class="text-center mb-10">
             <h1 class="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-gray-300 to-gray-500 mb-2">System Offline</h1>
             <p class="text-gray-500 tracking-widest uppercase text-sm">Awaiting manual initialization</p>
         </div>
-        
-        <button onclick="initSystem()" class="px-12 py-5 rounded-2xl font-bold text-white text-xl bg-gradient-to-r from-blue-600 to-emerald-500 hover:from-blue-500 hover:to-emerald-400 glow-blue transform transition-all duration-200 hover:-translate-y-1 active:translate-y-0 shadow-2xl tracking-widest uppercase ring-2 ring-white/20">
+        <button onclick="initSystem()" class="px-12 py-5 rounded-2xl font-bold text-white text-xl bg-gradient-to-r from-blue-600 to-emerald-500 hover:from-blue-500 hover:to-emerald-400 glow-blue transform transition-all duration-200 hover:-translate-y-1 active:translate-y-0 shadow-2xl tracking-widest uppercase ring-2 ring-white/20 z-50">
             Start Program
         </button>
     </div>
 
-    <div class="mb-8 text-center z-10">
-        <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">
-            Secure Terminal
-        </h1>
-        <p class="text-gray-400 mt-2 text-sm font-medium tracking-widest uppercase">Autonomous Biometrics</p>
-    </div>
-
-    <div class="w-full max-w-3xl bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 md:p-8 shadow-2xl flex flex-col items-center relative overflow-hidden z-10">
+    <div class="w-full max-w-4xl grid grid-cols-1 md:grid-cols-[1fr_300px] gap-6 z-10">
         
-        <div class="absolute -top-32 -left-32 w-64 h-64 bg-blue-500/10 rounded-full blur-3xl"></div>
-        <div class="absolute -bottom-32 -right-32 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl"></div>
-        
-        <div id="phaseBadge" class="relative z-10 mb-5 px-5 py-1.5 rounded-full text-xs font-bold tracking-widest uppercase transition-colors duration-300 ring-1" style="background-color: rgba(156,163,175,0.1); color: #9ca3af; ring-color: rgba(156,163,175,0.3);">
-            System Armed
-        </div>
+        <div class="bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 shadow-2xl flex flex-col relative overflow-hidden">
+            <div id="phaseBadge" class="self-start mb-4 px-5 py-1.5 rounded-full text-xs font-bold tracking-widest uppercase transition-colors duration-300 ring-1" style="background-color: rgba(156,163,175,0.1); color: #9ca3af; ring-color: rgba(156,163,175,0.3);">
+                System Armed
+            </div>
 
-        <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-gray-700 shadow-inner flex items-center justify-center z-10 ring-4 ring-black/50">
-            <img src="/video_feed" class="w-full h-full object-cover">
-            <div class="absolute inset-0 pointer-events-none opacity-30">
-                <div class="absolute top-4 left-4 w-8 h-8 border-t-2 border-l-2 border-white"></div>
-                <div class="absolute top-4 right-4 w-8 h-8 border-t-2 border-r-2 border-white"></div>
-                <div class="absolute bottom-4 left-4 w-8 h-8 border-b-2 border-l-2 border-white"></div>
-                <div class="absolute bottom-4 right-4 w-8 h-8 border-b-2 border-r-2 border-white"></div>
+            <div class="relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-gray-700 shadow-inner flex items-center justify-center ring-4 ring-black/50">
+                <img src="/video_feed" class="w-full h-full object-cover">
+                <div class="absolute inset-0 pointer-events-none opacity-30">
+                    <div class="absolute top-4 left-4 w-8 h-8 border-t-2 border-l-2 border-white"></div>
+                    <div class="absolute top-4 right-4 w-8 h-8 border-t-2 border-r-2 border-white"></div>
+                    <div class="absolute bottom-4 left-4 w-8 h-8 border-b-2 border-l-2 border-white"></div>
+                    <div class="absolute bottom-4 right-4 w-8 h-8 border-b-2 border-r-2 border-white"></div>
+                </div>
             </div>
-        </div>
 
-        <div id="instruction" class="text-2xl font-bold h-10 flex items-center justify-center text-center transition-colors duration-300 mt-6 z-10" style="color: #9ca3af;">
-            Awaiting Subject... Step into frame.
-        </div>
+            <div id="barWrap" class="w-full mt-4 mb-2 hidden">
+                <div class="h-2 w-full bg-gray-800 rounded-full overflow-hidden ring-1 ring-white/5">
+                    <div id="bar" class="h-full w-0 transition-all duration-300 ease-out" style="background-color: #3b82f6;"></div>
+                </div>
+            </div>
 
-        <div id="barWrap" class="w-full mt-2 mb-6 z-10 hidden">
-            <div class="h-2 w-full bg-gray-800 rounded-full overflow-hidden ring-1 ring-white/5">
-                <div id="bar" class="h-full w-0 transition-all duration-300 ease-out" style="background-color: #3b82f6;"></div>
-            </div>
-        </div>
-
-        <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-3 mb-6 z-10 mt-2">
-            <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
-                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Identity</div>
-                <div id="info-name" class="font-mono font-bold text-gray-300">--</div>
-            </div>
-            <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
-                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Proximity</div>
-                <div id="info-dist" class="font-mono font-bold text-gray-300">--</div>
-            </div>
-            <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
-                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Auth Phase</div>
-                <div id="info-phase" class="font-mono font-bold text-gray-400">Idle</div>
-            </div>
-            <div class="bg-gray-950/50 border border-gray-800 rounded-xl p-3 text-center">
-                <div class="text-[10px] text-gray-500 uppercase tracking-widest mb-1">Liveness</div>
-                <div id="info-gesture" class="font-mono font-bold text-gray-300">--</div>
+            <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center">
+                    <div class="text-[9px] text-gray-500 uppercase tracking-widest mb-1">Identity</div>
+                    <div id="info-name" class="font-mono font-bold text-gray-300">--</div>
+                </div>
+                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center">
+                    <div class="text-[9px] text-gray-500 uppercase tracking-widest mb-1">Proximity</div>
+                    <div id="info-dist" class="font-mono font-bold text-gray-300">--</div>
+                </div>
+                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center">
+                    <div class="text-[9px] text-gray-500 uppercase tracking-widest mb-1">Auth Phase</div>
+                    <div id="info-phase" class="font-mono font-bold text-gray-400">Idle</div>
+                </div>
+                <div class="bg-gray-950/70 border border-gray-800 rounded-xl p-3 text-center">
+                    <div class="text-[9px] text-gray-500 uppercase tracking-widest mb-1">Liveness</div>
+                    <div id="info-gesture" class="font-mono font-bold text-gray-300">--</div>
+                </div>
             </div>
         </div>
 
-        <div id="statusBanner" class="z-10 w-full px-8 py-4 rounded-xl font-bold text-gray-300 text-lg bg-gray-800 border border-gray-700 glow-gray text-center transition-all duration-300">
-            System Armed - Background Scanning Active
+        <div class="bg-gray-900/60 backdrop-blur-xl border border-gray-800 rounded-3xl p-6 shadow-2xl flex flex-col items-center justify-center relative">
+            <h3 class="text-[10px] font-bold text-gray-500 uppercase tracking-widest absolute top-6">AI Assistant Core</h3>
+            
+            <div class="relative w-48 h-48 my-4 flex items-center justify-center">
+                <div id="orb-container" class="absolute inset-0 z-0"></div>
+                <div id="holo-icon" class="absolute text-7xl transition-all duration-500 opacity-0 transform scale-50 pointer-events-none text-white z-10">✌️</div>
+            </div>
+
+            <div id="instruction" class="text-xl font-bold h-16 flex items-center justify-center text-center transition-colors duration-300" style="color: #9ca3af;">
+                Awaiting Subject...
+            </div>
         </div>
     </div>
 
@@ -567,7 +560,6 @@ HTML_TEMPLATE = """
             <h3 class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Capture Log</h3>
             <div class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
         </div>
-        
         <div class="grid grid-cols-2 gap-2">
             <div class="flex flex-col">
                 <div class="text-[9px] text-gray-500 text-center uppercase tracking-widest mb-1">1. Face</div>
@@ -593,15 +585,136 @@ HTML_TEMPLATE = """
         
         const colors = {
             blue: "#3b82f6", blueLight: "#60a5fa",
-            red: "#ef4444",
-            orange: "#f97316", orangeLight: "#fb923c",
-            green: "#10b981", greenLight: "#34d399",
-            gray: "#9ca3af"
+            red: "#ef4444", orange: "#f97316", orangeLight: "#fb923c",
+            green: "#10b981", greenLight: "#34d399", gray: "#9ca3af"
         };
 
-        // --- WEB AUDIO API (Generates Sci-Fi Sounds) ---
-        let audioCtx;
+        // =========================================================
+        // THREE.JS: MORPHING SIRI ORB SHADER
+        // =========================================================
+        let orbScene, orbCamera, orbRenderer, orbMaterial, orbMesh;
         
+        // Orb Morphing Target States (Now includes scaling and icon states!)
+        let targetOrb = {
+            speed: 0.5,
+            intensity: 0.1,
+            scaleZ: 1.0,
+            scaleXY: 1.0,
+            showIcon: false,
+            baseColor: new THREE.Color(0x000a20),
+            glowColor: new THREE.Color(0x3b82f6)
+        };
+
+        function initThreeJSOrb() {
+            const container = document.getElementById('orb-container');
+            orbScene = new THREE.Scene();
+            orbCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+            orbCamera.position.z = 4.5;
+
+            orbRenderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+            orbRenderer.setSize(container.clientWidth, container.clientHeight);
+            orbRenderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(orbRenderer.domElement);
+
+            const geometry = new THREE.SphereGeometry(1.5, 64, 64);
+
+            const vertexShader = `
+                uniform float time;
+                uniform float morphSpeed;
+                uniform float morphIntensity;
+                varying vec3 vNormal;
+                
+                void main() {
+                    vNormal = normal;
+                    vec3 p = position;
+                    float noise = sin(p.x * 4.0 + time * morphSpeed) * cos(p.y * 4.0 + time * morphSpeed * 0.8) * sin(p.z * 4.0 + time * morphSpeed * 1.2);
+                    p += normal * noise * morphIntensity;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+                }
+            `;
+
+            const fragmentShader = `
+                uniform vec3 baseColor;
+                uniform vec3 glowColor;
+                varying vec3 vNormal;
+                
+                void main() {
+                    float intensity = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
+                    vec3 finalColor = mix(baseColor, glowColor, intensity);
+                    gl_FragColor = vec4(finalColor, 0.95);
+                }
+            `;
+
+            orbMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0.0 },
+                    morphSpeed: { value: 0.5 },
+                    morphIntensity: { value: 0.1 },
+                    baseColor: { value: new THREE.Color(0x000a20) },
+                    glowColor: { value: new THREE.Color(0x3b82f6) }
+                },
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader,
+                transparent: true
+            });
+
+            orbMesh = new THREE.Mesh(geometry, orbMaterial);
+            orbScene.add(orbMesh);
+
+            animateOrb();
+        }
+
+        function animateOrb() {
+            requestAnimationFrame(animateOrb);
+            
+            orbMaterial.uniforms.time.value += 0.02;
+            orbMesh.rotation.y += 0.005;
+            orbMesh.rotation.x += 0.002;
+
+            // Interpolate shader morphing
+            orbMaterial.uniforms.morphSpeed.value += (targetOrb.speed - orbMaterial.uniforms.morphSpeed.value) * 0.05;
+            orbMaterial.uniforms.morphIntensity.value += (targetOrb.intensity - orbMaterial.uniforms.morphIntensity.value) * 0.05;
+            orbMaterial.uniforms.baseColor.value.lerp(targetOrb.baseColor, 0.05);
+            orbMaterial.uniforms.glowColor.value.lerp(targetOrb.glowColor, 0.05);
+
+            // Interpolate Mesh Scaling (Creates the flattening disc effect)
+            orbMesh.scale.z += (targetOrb.scaleZ - orbMesh.scale.z) * 0.08;
+            orbMesh.scale.x += (targetOrb.scaleXY - orbMesh.scale.x) * 0.08;
+            orbMesh.scale.y += (targetOrb.scaleXY - orbMesh.scale.y) * 0.08;
+
+            // Handle the Holographic Icon Overlay
+            const icon = document.getElementById('holo-icon');
+            if (targetOrb.showIcon) {
+                icon.style.opacity = 1;
+                icon.style.transform = "scale(1)";
+                icon.style.textShadow = `0 0 30px #${targetOrb.glowColor.getHexString()}`;
+            } else {
+                icon.style.opacity = 0;
+                icon.style.transform = "scale(0.5)";
+            }
+
+            orbRenderer.render(orbScene, orbCamera);
+        }
+
+        function setOrbState(state) {
+            if (state === "idle") {
+                targetOrb = { speed: 0.8, intensity: 0.05, scaleZ: 1.0, scaleXY: 1.0, showIcon: false, baseColor: new THREE.Color(0x000a20), glowColor: new THREE.Color(0x3b82f6) }; 
+            } else if (state === "face") {
+                targetOrb = { speed: 2.0, intensity: 0.15, scaleZ: 1.0, scaleXY: 1.0, showIcon: false, baseColor: new THREE.Color(0x002244), glowColor: new THREE.Color(0x00d4ff) }; 
+            } else if (state === "gesture") {
+                // FLATTENS INTO A RADAR DISC AND REVEALS THE ICON!
+                targetOrb = { speed: 3.0, intensity: 0.02, scaleZ: 0.1, scaleXY: 1.3, showIcon: true, baseColor: new THREE.Color(0x331100), glowColor: new THREE.Color(0xf97316) }; 
+            } else if (state === "error") {
+                targetOrb = { speed: 6.0, intensity: 0.6, scaleZ: 1.0, scaleXY: 1.0, showIcon: false, baseColor: new THREE.Color(0x330000), glowColor: new THREE.Color(0xef4444) }; 
+            } else if (state === "success") {
+                targetOrb = { speed: 0.2, intensity: 0.0, scaleZ: 1.0, scaleXY: 1.0, showIcon: false, baseColor: new THREE.Color(0x002211), glowColor: new THREE.Color(0x10b981) }; 
+            }
+        }
+
+        // =========================================================
+        // WEB AUDIO API
+        // =========================================================
+        let audioCtx;
         function playTone(freq, type, duration, vol=0.1) {
             if(!audioCtx) return;
             const osc = audioCtx.createOscillator();
@@ -610,32 +723,17 @@ HTML_TEMPLATE = """
             osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
             gain.gain.setValueAtTime(vol, audioCtx.currentTime);
             gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
-            osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            osc.start();
-            osc.stop(audioCtx.currentTime + duration);
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.start(); osc.stop(audioCtx.currentTime + duration);
         }
+        function soundWake() { playTone(300, 'sine', 0.2); setTimeout(() => playTone(600, 'sine', 0.3), 150); }
+        function soundFaceVerified() { playTone(800, 'square', 0.1, 0.05); setTimeout(() => playTone(1200, 'square', 0.2, 0.05), 100); }
+        function soundUnlocked() { playTone(523.25, 'sine', 0.5, 0.1); playTone(659.25, 'sine', 0.5, 0.1); setTimeout(() => playTone(1046.50, 'sine', 0.7, 0.1), 150); }
+        function soundError() { playTone(150, 'sawtooth', 0.3, 0.1); }
 
-        function soundWake() {
-            playTone(300, 'sine', 0.2);
-            setTimeout(() => playTone(600, 'sine', 0.3), 150);
-        }
-
-        function soundFaceVerified() {
-            playTone(800, 'square', 0.1, 0.05);
-            setTimeout(() => playTone(1200, 'square', 0.2, 0.05), 100);
-        }
-
-        function soundUnlocked() {
-            playTone(523.25, 'sine', 0.5, 0.1); // C5
-            playTone(659.25, 'sine', 0.5, 0.1); // E5
-            setTimeout(() => playTone(1046.50, 'sine', 0.7, 0.1), 150); // C6
-        }
-
-        function soundError() {
-            playTone(150, 'sawtooth', 0.3, 0.1);
-        }
-
+        // =========================================================
+        // KIOSK LOGIC
+        // =========================================================
         function setBadge(text, color, lightColor) {
             const badge = document.getElementById('phaseBadge');
             badge.innerText = text;
@@ -653,6 +751,8 @@ HTML_TEMPLATE = """
             currentState = "idle";
             missedFrames = 0;
             
+            setOrbState("idle"); 
+            
             document.getElementById('debugPanel').style.display = 'none'; 
             document.getElementById('barWrap').style.display = "none";
             
@@ -664,17 +764,15 @@ HTML_TEMPLATE = """
             document.getElementById('info-phase').style.color = colors.gray;
             document.getElementById('info-dist').innerText = "--";
 
-            document.getElementById('instruction').innerText = "Awaiting Subject... Step into frame.";
+            document.getElementById('instruction').innerText = "Awaiting Subject...";
             document.getElementById('instruction').style.color = colors.gray;
-
-            const banner = document.getElementById('statusBanner');
-            banner.innerText = "System Armed - Background Scanning Active";
-            banner.className = "z-10 w-full px-8 py-4 rounded-xl font-bold text-gray-300 text-lg bg-gray-800 border border-gray-700 glow-gray text-center transition-all duration-300";
 
             setBadge("System Armed", colors.gray, colors.gray);
         }
 
         function setupFaceUI() {
+            setOrbState("face"); 
+            
             document.getElementById('debugPanel').style.display = 'block'; 
             document.getElementById('barWrap').style.display = "block";
             
@@ -686,10 +784,6 @@ HTML_TEMPLATE = """
             document.getElementById('info-phase').innerText = "Face ID";
             document.getElementById('info-phase').style.color = colors.blueLight;
             document.getElementById('info-gesture').innerText = "Pending";
-
-            const banner = document.getElementById('statusBanner');
-            banner.innerText = "Authenticating Identity...";
-            banner.className = "z-10 w-full px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-blue-600 to-blue-500 glow-blue text-center transition-all duration-300";
 
             setBadge("Step 1: Face ID", colors.blue, colors.blueLight);
         }
@@ -708,7 +802,6 @@ HTML_TEMPLATE = """
                     const inst = document.getElementById('instruction');
                     const bar = document.getElementById('bar');
                     
-                    // --- IDLE PHASE ---
                     if (currentState === "idle") {
                         if (d.status === "face_found") {
                             soundWake();
@@ -719,7 +812,6 @@ HTML_TEMPLATE = """
                         }
                     }
                     
-                    // --- FACE PHASE ---
                     else if (currentState === "face") {
                         if (d.status === "wait" && d.ratio === 0) {
                             missedFrames++;
@@ -733,19 +825,19 @@ HTML_TEMPLATE = """
                             document.getElementById('info-dist').innerText = (d.ratio > 0 ? p.toFixed(0) + "%" : "--");
                             
                             if (d.instruction.includes("Intruder")) {
+                                setOrbState("error"); 
                                 inst.style.color = colors.red;
                                 bar.style.backgroundColor = colors.red;
-                                if (!hasPlayedError) {
-                                    soundError(); 
-                                    hasPlayedError = true; 
-                                }
+                                if (!hasPlayedError) { soundError(); hasPlayedError = true; }
                             } else {
+                                setOrbState("face"); 
                                 inst.style.color = colors.blueLight;
                                 bar.style.backgroundColor = colors.blue;
                             }
 
                             if(d.status === "identified") {
                                 soundFaceVerified(); 
+                                setOrbState("gesture"); 
                                 currentState = "gesture"; 
                                 
                                 if (d.image) {
@@ -766,7 +858,6 @@ HTML_TEMPLATE = """
                         }
                     } 
                     
-                    // --- GESTURE PHASE ---
                     else if (currentState === "gesture") {
                         if (d.status === "wait_gesture" && d.instruction.includes("Face lost")) {
                             missedFrames++;
@@ -777,6 +868,7 @@ HTML_TEMPLATE = """
                             
                             if(d.status === "success") {
                                 soundUnlocked(); 
+                                setOrbState("success"); 
                                 currentState = "success"; 
                                 
                                 if (d.image) {
@@ -793,10 +885,6 @@ HTML_TEMPLATE = """
                                 document.getElementById('info-phase').innerText = "Unlocked";
                                 document.getElementById('info-phase').style.color = colors.greenLight;
                                 
-                                const banner = document.getElementById('statusBanner');
-                                banner.innerText = "Authentication Successful - Access Granted";
-                                banner.className = "z-10 w-full px-8 py-4 rounded-xl font-bold text-white text-lg bg-gradient-to-r from-emerald-600 to-emerald-500 glow-green text-center transition-all duration-300";
-                                
                                 setTimeout(() => {
                                     resetToIdle();
                                     autonomousLoop(); 
@@ -811,9 +899,9 @@ HTML_TEMPLATE = """
             .catch(() => { if (currentState !== "success") setTimeout(autonomousLoop, 1000); });
         }
 
-        // TRIGGERED BY THE START BUTTON ON THE OVERLAY
         function initSystem() {
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            initThreeJSOrb(); 
             document.getElementById('startOverlay').style.display = 'none';
             resetToIdle();
             autonomousLoop();
