@@ -28,7 +28,7 @@ shared_frame = None
 last_known_face = None
 last_known_hand = None
 use_fallback = False
-authenticated_name = None  # Remembers who authenticated in Phase 1
+authenticated_name = None 
 
 app = Flask(__name__)
 
@@ -286,14 +286,29 @@ def draw_hand_landmarks(frame, landmarks, gesture=""):
         cv2.putText(frame, f"Gesture: {gesture}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
 
 def is_victory_sign(landmarks):
-    """Bypasses AI and uses pure geometry to check if exactly 2 fingers are up."""
     if landmarks is None or len(landmarks) < 21: return False
-    
     fingers_up = 0
     for tip, pip in zip([8, 12, 16, 20], [6, 10, 14, 18]):
         if landmarks[tip][1] < landmarks[pip][1]: 
             fingers_up += 1
     return fingers_up == 2
+
+# NEW: Sci-Fi "Corner Bracket" Square Annotation function
+def draw_target_box(img, x, y, w, h, color, thickness=3):
+    l = int(min(w, h) * 0.2) # Line length is 20% of the box size
+    
+    # Top Left
+    cv2.line(img, (x, y), (x+l, y), color, thickness)
+    cv2.line(img, (x, y), (x, y+l), color, thickness)
+    # Top Right
+    cv2.line(img, (x+w, y), (x+w-l, y), color, thickness)
+    cv2.line(img, (x+w, y), (x+w, y+l), color, thickness)
+    # Bottom Left
+    cv2.line(img, (x, y+h), (x+l, y+h), color, thickness)
+    cv2.line(img, (x, y+h), (x, y+h-l), color, thickness)
+    # Bottom Right
+    cv2.line(img, (x+w, y+h), (x+w-l, y+h), color, thickness)
+    cv2.line(img, (x+w, y+h), (x+w, y+h-l), color, thickness)
 
 # =============================================================================
 # Flask Server & API
@@ -305,17 +320,14 @@ def camera_thread(camera_index):
     while True:
         ret, frame = cap.read()
         if ret:
+            # 1. Flip it so it acts like a mirror
             frame = cv2.flip(frame, 1)
-            # Draw trackers from memory
-            if last_known_face:
-                bx, by, bw, bh, color = last_known_face
-                cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), color, 2)
-            if last_known_hand:
-                draw_hand_landmarks(frame, last_known_hand['pts'], last_known_hand['gesture'])
             
+            # 2. Save the clean frame for the web UI
             with shared_frame_lock:
                 shared_frame = frame.copy()
-        else: time.sleep(0.01)
+        else: 
+            time.sleep(0.01)
 
 @app.route("/")
 def index(): return render_template_string(HTML_TEMPLATE)
@@ -345,9 +357,28 @@ def process_frame():
     annotated = frame.copy()
 
     # ---------------------------------------------------------
+    # PHASE 0: IDLE TRACKING (Before hitting Login)
+    # ---------------------------------------------------------
+    if phase == "idle":
+        with ai_lock:
+            detections = detect_faces(frame[:, :, ::-1], det_sess_g, anchors_g)
+        
+        if detections:
+            best_face = max(detections, key=lambda d: d["score"])
+            fx1, fy1, fx2, fy2 = best_face["bbox"]
+            bx, by, bw, bh = int(fx1), int(fy1), int(fx2 - fx1), int(fy2 - fy1)
+            
+            # Uses a cool Cyan color for idle tracking
+            last_known_face = [max(0, bx), max(0, by), bw, bh, (255, 200, 50)] 
+        else:
+            last_known_face = None
+            
+        return jsonify({"status": "idle"})
+
+    # ---------------------------------------------------------
     # PHASE 1: INITIAL FACE ID (Strict Distance)
     # ---------------------------------------------------------
-    if phase == "face":
+    elif phase == "face":
         last_known_hand = None 
         with ai_lock:
             detections = detect_faces(frame[:, :, ::-1], det_sess_g, anchors_g)
@@ -377,7 +408,7 @@ def process_frame():
         if name:
             authenticated_name = name # Save identity for Phase 2
             last_known_face = [max(0, bx), max(0, by), bw, bh, (0, 255, 0)] # Green Box
-            cv2.rectangle(annotated, (bx, by), (bx+bw, by+bh), (0, 255, 0), 3)
+            draw_target_box(annotated, bx, by, bw, bh, (0, 255, 0), thickness=3)
             _, buffer = cv2.imencode('.jpg', annotated)
             return jsonify({
                 "status": "identified", 
@@ -414,7 +445,7 @@ def process_frame():
                 
                 # Yellow tracking box
                 last_known_face = [max(0, bx), max(0, by), bw, bh, (0, 255, 255)]
-                cv2.rectangle(annotated, (max(0, bx), max(0, by)), (bx+bw, by+bh), (0, 255, 255), 2)
+                draw_target_box(annotated, max(0, bx), max(0, by), bw, bh, (0, 255, 255), thickness=3)
                 cv2.putText(annotated, f"Tracking: {name}", (max(0, bx), max(0, by)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         # Freeze if original face is lost
@@ -570,6 +601,17 @@ HTML_TEMPLATE = """
             gray: "#9ca3af"
         };
 
+        // NEW: Background idle polling loop!
+        setInterval(() => {
+            if(!active) {
+                fetch('/process', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phase: "idle" })
+                }).catch(() => {});
+            }
+        }, 300);
+
         function setBadge(text, color, lightColor) {
             const badge = document.getElementById('phaseBadge');
             badge.innerText = text;
@@ -656,15 +698,22 @@ HTML_TEMPLATE = """
                             inst.style.color = colors.orangeLight;
                         }
                     } 
+                    // --- GESTURE PHASE LOGIC ---
                     else if (currentPhase === "gesture") {
-                        if (d.image) {
-                            document.getElementById('snapGesture').src = "data:image/jpeg;base64," + d.image;
-                            document.getElementById('snapGesture').style.display = "block";
-                            document.getElementById('msgGesture').style.display = "none";
-                        }
+                        
+                        // We removed the continuous image update from here!
+                        // The UI will now wait patiently.
                         
                         if(d.status === "success") {
                             active = false; 
+                            
+                            // LOCK IN THE GESTURE SNAPSHOT ONLY ON SUCCESS!
+                            if (d.image) {
+                                document.getElementById('snapGesture').src = "data:image/jpeg;base64," + d.image;
+                                document.getElementById('snapGesture').style.display = "block";
+                                document.getElementById('msgGesture').style.display = "none";
+                            }
+                            
                             inst.style.color = colors.greenLight;
                             setBadge("✅ Fully Unlocked", colors.green, colors.greenLight);
                             
