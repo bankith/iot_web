@@ -700,7 +700,8 @@ HTML_TEMPLATE = """
             } else if (state === "face") {
                 targetOrb = { speed: 2.0, intensity: 0.15, scaleZ: 1.0, scaleXY: 1.0, showIcon: false, baseColor: new THREE.Color(0x002244), glowColor: new THREE.Color(0x00d4ff) }; 
             } else if (state === "gesture") {
-                targetOrb = { speed: 3.0, intensity: 0.02, scaleZ: 0.1, scaleXY: 1.3, showIcon: true, baseColor: new THREE.Color(0x331100), glowColor: new THREE.Color(0xf97316) }; 
+                // FIXED: Changed back to a rippling sphere, but in yellow!
+                targetOrb = { speed: 2.0, intensity: 0.15, scaleZ: 1.0, scaleXY: 1.0, showIcon: true, baseColor: new THREE.Color(0x332200), glowColor: new THREE.Color(0xfacc15) }; 
             } else if (state === "error") {
                 targetOrb = { speed: 6.0, intensity: 0.6, scaleZ: 1.0, scaleXY: 1.0, showIcon: false, baseColor: new THREE.Color(0x330000), glowColor: new THREE.Color(0xef4444) }; 
             } else if (state === "success") {
